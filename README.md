@@ -12,7 +12,7 @@ If the register pointer is set to `"a`, say, the next clipping will also be stor
 By setting the register pointer, you can choose which register your next paste will read from.
 Thus, `pincer register set a` means that your next copy will be like `"ay` in Vim, and your next paste will be like `"ap`.
 
-Of course, opening a terminal and typing 22 characters is not convenient to select aregister is not convenient.
+Of course, opening a terminal and typing 22 characters is not convenient to select a register is not convenient.
 Pincer is meant for keyboard oriented desktop environment such as sway, where you can
 create a key binding for `pincer register set`, which will then grab the next alphanumeric key.
 You can query the daemon for the selected register with `pincer register active`, and display it on your status line.
