@@ -6,10 +6,10 @@ use clap::{Args, Parser as ArgParser, Subcommand};
 use tokio::{signal::ctrl_c, sync::Mutex, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use pincer::clipboard::Clipboard;
-use pincer::daemon::{socket_path, Daemon, RegisterCommand, Request, Response};
-use pincer::pincer::Pincer;
-use pincer::register::{RegisterAddress, ADDRESS_HELP};
+use pincers::clipboard::Clipboard;
+use pincers::daemon::{socket_path, Daemon, RegisterCommand, Request, Response};
+use pincers::pincer::Pincer;
+use pincers::register::{RegisterAddress, ADDRESS_HELP};
 use tokio_unix_ipc::channel_from_std;
 
 type ErrorT = String;
