@@ -46,7 +46,7 @@ impl Default for RegisterAddress {
     }
 }
 impl Display for RegisterAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
         use RegisterAddress::*;
         write!(f, "\"")?;
         match self {
