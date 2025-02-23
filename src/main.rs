@@ -17,6 +17,8 @@ use pincers::register::{RegisterAddress, ADDRESS_HELP};
 #[command(name = "pincer")]
 #[command(version = "0.1")]
 struct CliOptions {
+    #[arg(long = "log-level", help = "Log level", default_value = "Info")]
+    log_level: spdlog::Level,
     #[command(subcommand)]
     command: CliCommands,
 }
@@ -140,6 +142,7 @@ fn handle_yank(addr: RegisterAddress, resp: Result<usize, Error>) -> Result<(), 
 async fn main() -> Result<(), Anyhow> {
     let args = CliOptions::parse();
     use CliCommands::*;
+    spdlog::default_logger().set_level_filter(spdlog::LevelFilter::MoreSevereEqual(args.log_level));
 
     let _ = match args.command {
         Daemon {} => daemon().await,
