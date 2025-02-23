@@ -121,7 +121,7 @@ async fn send_request(req: Request) -> Result<(), Anyhow> {
 }
 
 fn handle_response(rsp: Response) -> Result<(), Error> {
-    println!("{rsp:?}");
+    debug!("Received response: {rsp:?}");
     match rsp {
         Response::Yank(addr, resp) => handle_yank(addr, resp),
         _ => Ok(()),

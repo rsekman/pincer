@@ -146,7 +146,8 @@ impl Daemon {
         pincer: &Arc<Mutex<Pincer>>,
     ) -> Result<(), Anyhow> {
         let mut pincer = pincer.lock().await;
-        let resp = match dbg!(req) {
+        debug!("Received request: {req:?}");
+        let resp = match req {
             Request::Yank(addr, reg) => {
                 Response::Yank(addr.unwrap_or_default(), pincer.yank(addr, reg.into_iter()))
             }
