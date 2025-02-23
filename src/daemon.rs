@@ -87,7 +87,8 @@ impl Daemon {
                 conn  = socket.accept() => match conn  {
                     Ok((stream, _)) => {
                         let p = self.pincer.clone();
-                        tokio::spawn(async move { Self::accept(stream, p).await });
+                        let t = self.token.clone();
+                        tokio::spawn(async move { Self::accept(stream, p, t).await });
                     },
                     Err(e) => { error!("{e}"); break Err(Anyhow::new(e)) }
                 }
@@ -95,7 +96,11 @@ impl Daemon {
         }
     }
 
-    async fn accept(conn: UnixStream, pincer: Arc<Mutex<Pincer>>) -> Result<(), Anyhow> {
+    async fn accept(
+        conn: UnixStream,
+        pincer: Arc<Mutex<Pincer>>,
+        token: CancellationToken,
+    ) -> Result<(), Anyhow> {
         // No errors from handling a request should be fatal, but the short-circuit ? operator is
         // more convenient than if let Some(...)
         let (tx, rx) = conn
@@ -107,21 +112,25 @@ impl Daemon {
             })?;
         loop {
             use std::io::ErrorKind::*;
-            match rx.recv().await {
-                Ok(req) => Self::handle_request(req, &tx, &pincer).await?,
-                Err(e) => match e.kind() {
-                    TimedOut | ConnectionReset | ConnectionAborted => {
-                        // We're done with this connection
-                        info!("{e}");
-                        return Ok(());
-                    }
-                    // Malformed input is not a fatal error, the client could send valid data at a
-                    // later point
-                    InvalidData => warn!("Received invalid data from client: {e}"),
-                    _ => {
-                        warn!("Could not receive from client: {e}")
-                    }
-                },
+            select! {
+                    _ = token.cancelled() => return Ok(()),
+                    msg = rx.recv() =>
+                match msg {
+                    Ok(req) => Self::handle_request(req, &tx, &pincer).await?,
+                    Err(e) => match e.kind() {
+                        TimedOut | ConnectionReset | ConnectionAborted => {
+                            // We're done with this connection
+                            info!("{e}");
+                            return Ok(());
+                        }
+                        // Malformed input is not a fatal error, the client could send valid data at a
+                        // later point
+                        InvalidData => warn!("Received invalid data from client: {e}"),
+                        _ => {
+                            warn!("Could not receive from client: {e}")
+                        }
+                    },
+                }
             }
         }
     }
