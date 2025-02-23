@@ -110,27 +110,31 @@ impl Daemon {
                 error!("Could not accept incoming connection: {e}");
                 e
             })?;
-        loop {
-            use std::io::ErrorKind::*;
-            select! {
-                    _ = token.cancelled() => return Ok(()),
-                    msg = rx.recv() =>
-                match msg {
-                    Ok(req) => Self::handle_request(req, &tx, &pincer).await?,
-                    Err(e) => match e.kind() {
-                        TimedOut | ConnectionReset | ConnectionAborted => {
-                            // We're done with this connection
-                            info!("{e}");
-                            return Ok(());
-                        }
-                        // Malformed input is not a fatal error, the client could send valid data at a
-                        // later point
-                        InvalidData => warn!("Received invalid data from client: {e}"),
-                        _ => {
-                            warn!("Could not receive from client: {e}")
-                        }
+        use std::io::ErrorKind::*;
+        select! {
+            _ = token.cancelled() => return Ok(()),
+            // tokio-ipc-unix sockets are connectionless, so we will only receive one message per
+            // accept() call; there is no need to loop in this function
+            msg = rx.recv() => match msg {
+                Ok(req) => Self::handle_request(req, &tx, &pincer).await,
+                Err(e) => match e.kind() {
+                    TimedOut | ConnectionReset | ConnectionAborted => {
+                        info!("Client disconnected: {e}");
+                        Ok(())
+                    }
+                    // Malformed input is not a fatal error, the client could send valid data at a
+                    // later point
+                    InvalidData => {
+                        warn!("Received invalid data from client: {e}");
+                        Err(Anyhow::new(e))
                     },
-                }
+                    // UnexpectedEof is likely propagated up from the Receiver because it tries
+                    // to deserialize 0 bytes. Maybe upstream bug?
+                    _ => {
+                        warn!("Could not receive from client: {e}");
+                        Err(Anyhow::new(e))
+                    }
+                },
             }
         }
     }
