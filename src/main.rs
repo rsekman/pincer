@@ -1,18 +1,17 @@
-use std::error::Error;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
 use clap::{Args, Parser as ArgParser, Subcommand};
+use spdlog::prelude::*;
 use tokio::{signal::ctrl_c, sync::Mutex, task::JoinSet};
+use tokio_unix_ipc::channel_from_std;
 use tokio_util::sync::CancellationToken;
 
 use pincers::clipboard::Clipboard;
 use pincers::daemon::{socket_path, Daemon, RegisterCommand, Request, Response};
+use pincers::error::{Anyhow, Error};
 use pincers::pincer::Pincer;
 use pincers::register::{RegisterAddress, ADDRESS_HELP};
-use tokio_unix_ipc::channel_from_std;
-
-type ErrorT = String;
 
 #[derive(ArgParser)]
 #[command(name = "pincer")]
@@ -72,7 +71,7 @@ struct RegisterArgs {
     command: RegisterCommand,
 }
 
-async fn daemon() -> Result<(), Box<dyn Error>> {
+async fn daemon() -> Result<(), Anyhow> {
     println!("Launching daemon");
     let p = Arc::new(Mutex::new(Pincer::new()));
     let token = CancellationToken::new();
@@ -86,9 +85,9 @@ async fn daemon() -> Result<(), Box<dyn Error>> {
     let t = token.clone();
     tasks.spawn(async move {
         match ctrl_c().await {
-            Err(e) => eprintln!("WARNING: could not catch Ctrl-C: {e}"),
+            Err(e) => warn!("Could not catch Ctrl-C: {e}"),
             Ok(_) => {
-                println!("Received SIGINT")
+                info!("Received SIGINT, exiting")
             }
         };
         t.cancel();
@@ -99,42 +98,46 @@ async fn daemon() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn send_request(req: Request) -> Result<(), Box<dyn Error>> {
+async fn send_request(req: Request) -> Result<(), Anyhow> {
     let sp = socket_path();
     let (tx, rx) = UnixStream::connect(&sp)
         .and_then(channel_from_std::<Request, Response>)
         .map_err(|e| {
-            format!(
-                "FATAL ERROR: Could not connect to daemon at {}: {e}",
+            error!(
+                "Could not connect to daemon at {}: {e}",
                 sp.to_string_lossy()
-            )
+            );
+            e
         })?;
-    tx.send(req)
-        .await
-        .map_err(|e| format!("FATAL ERROR: Could not transmit request: {e}"))?;
-    rx.recv()
-        .await
-        .map(|v| dbg!(v))
-        .map_err(|e| format!("IO error: {e}"))
-        .and_then(handle_response)
-        .map_err(|e| e.into())
+    tx.send(req).await.map_err(|e| {
+        error!("Could not transmit request: {e}");
+        e
+    })?;
+    let req = rx.recv().await.map_err(|e| {
+        error!("Could not send request to daemon: {e}");
+        e
+    })?;
+    handle_response(req).map_err(Anyhow::msg)
 }
 
-fn handle_response(rsp: Response) -> Result<(), ErrorT> {
+fn handle_response(rsp: Response) -> Result<(), Error> {
     println!("{rsp:?}");
     match rsp {
-        Response::Yank(r) => handle_yank(r),
+        Response::Yank(addr, resp) => handle_yank(addr, resp),
         _ => Ok(()),
     }
 }
 
-fn handle_yank(r: Result<(RegisterAddress, usize), ErrorT>) -> Result<(), ErrorT> {
-    r.map(|(addr, n)| println!("Yanked {n} bytes into {addr}"))
-        .map_err(|e| format!("WARNING: yank unsuccessful: {e}"))
+fn handle_yank(addr: RegisterAddress, resp: Result<usize, Error>) -> Result<(), Error> {
+    resp.map(|n| info!("Yanked {n} bytes into {addr}"))
+        .map_err(|e| {
+            warn!("Could not yank into {addr}: {e}");
+            e
+        })
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Anyhow> {
     let args = CliOptions::parse();
     use CliCommands::*;
 

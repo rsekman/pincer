@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::error::ErrorT;
+use crate::error::Error;
 use crate::register::{MimeType, NumericT, Register, RegisterAddress, RegisterSummary};
 
 /// Struct for the state of the clipboard manager
@@ -47,7 +47,7 @@ impl Pincer {
         .unwrap()
     }
 
-    pub fn paste(&self, addr: Option<RegisterAddress>, mime: &String) -> Result<&Vec<u8>, ErrorT> {
+    pub fn paste(&self, addr: Option<RegisterAddress>, mime: &String) -> Result<&Vec<u8>, Error> {
         let raw_addr = addr.unwrap_or_default();
         self.register(addr).get(mime).ok_or(format!(
             "Register {raw_addr:?} does not contain MIME type {mime}"
@@ -58,11 +58,7 @@ impl Pincer {
         self.pointer = circular_shift(self.pointer, NumericT::new(1).unwrap())
     }
 
-    pub fn yank<T>(
-        &mut self,
-        addr: Option<RegisterAddress>,
-        pastes: T,
-    ) -> Result<(RegisterAddress, usize), ErrorT>
+    pub fn yank<T>(&mut self, addr: Option<RegisterAddress>, pastes: T) -> Result<usize, Error>
     where
         T: Iterator<Item = (MimeType, Vec<u8>)>,
     {
@@ -84,18 +80,18 @@ impl Pincer {
         if let Numeric(_) = addr {
             self.advance_pointer();
         }
-        Ok((addr, bytes))
+        Ok(bytes)
     }
 
     pub fn yank_one<T>(
         &mut self,
         addr: Option<RegisterAddress>,
         (mime, data): (String, Vec<u8>),
-    ) -> Result<(RegisterAddress, usize), ErrorT> {
+    ) -> Result<usize, Error> {
         self.yank(addr, std::iter::once((mime, data)))
     }
 
-    pub fn list(&self) -> Result<BTreeMap<RegisterAddress, RegisterSummary>, ErrorT> {
+    pub fn list(&self) -> Result<BTreeMap<RegisterAddress, RegisterSummary>, Error> {
         let mut out = BTreeMap::new();
         out.extend(RegisterAddress::iter().filter_map(|addr| {
             match addr {

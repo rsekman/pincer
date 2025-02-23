@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.96"
 bounded-integer = { version = "0.5.8", features = ["num-traits02", "serde1", "types"] }
 clap = { version = "4.5.29", features = ["derive"] }
 fs2 = "0.4.3"

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use clap::Subcommand;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use spdlog::prelude::*;
 use tokio::{
     net::{UnixListener, UnixStream},
     select,
@@ -14,7 +15,7 @@ use tokio::{
 use tokio_unix_ipc::{channel_from_std, Sender};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::ErrorT;
+use crate::error::{Anyhow, Error};
 use crate::pincer::Pincer;
 use crate::register::{Register, RegisterAddress, RegisterSummary, ADDRESS_HELP};
 
@@ -37,7 +38,7 @@ impl Daemon {
     pub async fn new(
         pincer: Arc<Mutex<Pincer>>,
         token: CancellationToken,
-    ) -> Result<Daemon, ErrorT> {
+    ) -> Result<Daemon, Anyhow> {
         let dir = get_directory();
         create_dir_all(&dir)
             .or_else(|e| match e.kind() {
@@ -45,42 +46,39 @@ impl Daemon {
                 _ => Err(e),
             })
             .map_err(|e| {
-                format!(
-                    "FATAL ERROR: Could not create directory {}: {e}",
-                    dir.to_string_lossy()
-                )
+                error!("Could not create directory {}: {e}", dir.to_string_lossy());
+                e
             })?;
 
         // Try to acquire lock
         let lock_path = lock_path();
         let lock_path_str = lock_path.to_string_lossy();
         let lock = File::create(&lock_path).map_err(|e| {
-            format!(
-                "FATAL ERROR: Could not open lock file {}: {e}",
-                lock_path_str
-            )
-        });
-        let _ = lock
-            .as_ref()
-            .map(FileExt::try_lock_exclusive)
-            .map_err(|e| format!("FATAL ERROR: Could not acquire lock {}: {e}", lock_path_str))?;
+            error!("Could not open lock file {}: {e}", lock_path_str);
+            e
+        })?;
+        let _ = lock.try_lock_exclusive().map_err(|e| {
+            error!("Could not acquire lock {}: {e}", lock_path_str);
+            e
+        })?;
 
         Ok(Daemon {
             pincer,
             token,
-            lock: lock?,
+            lock,
         })
     }
 
     /// Listen for commands
-    pub async fn listen(&mut self) -> Result<(), ErrorT> {
+    pub async fn listen(&mut self) -> Result<(), Anyhow> {
         let sock_path = socket_path();
         let _ = std::fs::remove_file(&sock_path);
         let socket = UnixListener::bind(&sock_path).map_err(|e| {
-            format!(
-                "FATAL ERROR: Could not bind to socket {}: {e}",
+            error!(
+                "Could not bind to socket {}: {e}",
                 sock_path.to_string_lossy()
-            )
+            );
+            e
         })?;
 
         loop {
@@ -91,22 +89,39 @@ impl Daemon {
                         let p = self.pincer.clone();
                         tokio::spawn(async move { Self::accept(stream, p).await });
                     },
-                    Err(e) => { break Err(format!("FATAL ERROR: {e}")); }
+                    Err(e) => { error!("{e}"); break Err(Anyhow::new(e)) }
                 }
             };
         }
     }
 
-    async fn accept(conn: UnixStream, pincer: Arc<Mutex<Pincer>>) -> Result<(), ErrorT> {
-        let conn = dbg!(conn)
+    async fn accept(conn: UnixStream, pincer: Arc<Mutex<Pincer>>) -> Result<(), Anyhow> {
+        // No errors from handling a request should be fatal, but the short-circuit ? operator is
+        // more convenient than if let Some(...)
+        let (tx, rx) = conn
             .into_std()
-            .map_err(|e| format!("FATAL ERROR: {e}"))?;
-        let (tx, rx) = channel_from_std::<Response, Request>(conn)
-            .map_err(|_| "FATAL ERROR: could not accept incoming connection: {e}")?;
+            .and_then(channel_from_std::<Response, Request>)
+            .map_err(|e| {
+                error!("Could not accept incoming connection: {e}");
+                e
+            })?;
         loop {
+            use std::io::ErrorKind::*;
             match rx.recv().await {
                 Ok(req) => Self::handle_request(req, &tx, &pincer).await?,
-                Err(e) => break Err(format!("WARNING: error receiving data: {e}")),
+                Err(e) => match e.kind() {
+                    TimedOut | ConnectionReset | ConnectionAborted => {
+                        // We're done with this connection
+                        info!("{e}");
+                        return Ok(());
+                    }
+                    // Malformed input is not a fatal error, the client could send valid data at a
+                    // later point
+                    InvalidData => warn!("Received invalid data from client: {e}"),
+                    _ => {
+                        warn!("Could not receive from client: {e}")
+                    }
+                },
             }
         }
     }
@@ -116,29 +131,34 @@ impl Daemon {
         req: Request,
         tx: &Sender<Response>,
         pincer: &Arc<Mutex<Pincer>>,
-    ) -> Result<(), ErrorT> {
+    ) -> Result<(), Anyhow> {
         let mut pincer = pincer.lock().await;
         let resp = match dbg!(req) {
-            Request::Yank(addr, reg) => Response::Yank(pincer.yank(addr, reg.into_iter())),
-            Request::Paste(addr, mime) => Response::Paste(pincer.paste(addr, &mime).cloned()),
-            Request::Show(addr) => Response::Show(Ok(pincer.register(addr).clone())),
+            Request::Yank(addr, reg) => {
+                Response::Yank(addr.unwrap_or_default(), pincer.yank(addr, reg.into_iter()))
+            }
+            Request::Paste(addr, mime) => {
+                Response::Paste(addr.unwrap_or_default(), pincer.paste(addr, &mime).cloned())
+            }
+            Request::Show(addr) => {
+                Response::Show((addr.unwrap_or_default(), Ok(pincer.register(addr).clone())))
+            }
             Request::List() => Response::List(pincer.list()),
             Request::Register(_) => todo!(),
         };
-        tx.send(dbg!(resp))
-            .await
-            .map_err(|e| format!("WARNING: sending response failed: {e}"))
+        tx.send(resp).await.map_err(|e| {
+            warn!("Sending response failed: {e}");
+            Anyhow::new(e)
+        })
     }
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.lock.unlock().map_err(|e| {
-            eprintln!(
-                "WARNING: Could unlock {}: {e}.",
-                lock_path().to_string_lossy()
-            )
-        });
+        let _ = self
+            .lock
+            .unlock()
+            .map_err(|e| warn!("Could unlock {}: {e}.", lock_path().to_string_lossy()));
     }
 }
 
@@ -183,9 +203,9 @@ pub enum Request {
 #[derive(Serialize, Deserialize, Debug)]
 /// Possible responses from the daemon
 pub enum Response {
-    Yank(Result<(RegisterAddress, usize), ErrorT>),
-    Paste(Result<Vec<u8>, ErrorT>),
-    Show(Result<Register, ErrorT>),
-    List(Result<BTreeMap<RegisterAddress, RegisterSummary>, ErrorT>),
-    Register(Result<(), ErrorT>),
+    Yank(RegisterAddress, Result<usize, Error>),
+    Paste(RegisterAddress, Result<Vec<u8>, Error>),
+    Show((RegisterAddress, Result<Register, Error>)),
+    List(Result<BTreeMap<RegisterAddress, RegisterSummary>, Error>),
+    Register(Result<(), Error>),
 }

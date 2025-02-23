@@ -12,7 +12,7 @@ use nom::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::ErrorT;
+use crate::error::{Anyhow, Error};
 
 const N_NUMERIC: u8 = 10;
 const N_NAMED: u8 = 26;
@@ -81,12 +81,12 @@ fn do_parse_address(input: &str) -> IResult<&str, RegisterAddress> {
 }
 
 impl FromStr for RegisterAddress {
-    type Err = ErrorT;
-    fn from_str(input: &str) -> Result<RegisterAddress, ErrorT> {
+    type Err = Anyhow;
+    fn from_str(input: &str) -> Result<RegisterAddress, Anyhow> {
         terminated(do_parse_address, eof)
             .parse(input)
             .map(|(_, addr)| addr)
-            .map_err(|_| "Register address must be a single character from [0-9a-z].".to_owned())
+            .map_err(|_| Anyhow::msg("Register address must be a single character from [0-9a-z]."))
     }
 }
 
