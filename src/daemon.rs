@@ -57,7 +57,7 @@ impl Daemon {
             error!("Could not open lock file {}: {e}", lock_path_str);
             e
         })?;
-        let _ = lock.try_lock_exclusive().map_err(|e| {
+        lock.try_lock_exclusive().map_err(|e| {
             error!("Could not acquire lock {}: {e}", lock_path_str);
             e
         })?;
@@ -112,7 +112,7 @@ impl Daemon {
             })?;
         use std::io::ErrorKind::*;
         select! {
-            _ = token.cancelled() => return Ok(()),
+            _ = token.cancelled() => Ok(()),
             // tokio-ipc-unix sockets are connectionless, so we will only receive one message per
             // accept() call; there is no need to loop in this function
             msg = rx.recv() => match msg {
@@ -160,7 +160,7 @@ impl Daemon {
             Request::List() => Response::List(pincer.list()),
             Request::Register(_) => todo!(),
         };
-        debug!("Sending response {resp:?}");
+        debug!("Sending response: {resp:?}");
         tx.send(resp).await.map_err(|e| {
             warn!("Sending response failed: {e}");
             Anyhow::new(e)

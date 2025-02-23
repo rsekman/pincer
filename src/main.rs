@@ -111,7 +111,7 @@ async fn send_request(req: Request) -> Result<(), Anyhow> {
             );
             e
         })?;
-    debug!("Sending request {req:?}");
+    debug!("Sending request: {req:?}");
     tx.send(req).await.map_err(|e| {
         error!("Could not transmit request: {e}");
         e
