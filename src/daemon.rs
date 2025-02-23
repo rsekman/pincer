@@ -160,6 +160,7 @@ impl Daemon {
             Request::List() => Response::List(pincer.list()),
             Request::Register(_) => todo!(),
         };
+        debug!("Sending response {resp:?}");
         tx.send(resp).await.map_err(|e| {
             warn!("Sending response failed: {e}");
             Anyhow::new(e)

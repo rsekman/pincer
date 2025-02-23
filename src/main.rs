@@ -74,7 +74,7 @@ struct RegisterArgs {
 }
 
 async fn daemon() -> Result<(), Anyhow> {
-    println!("Launching daemon");
+    info!("Launching daemon");
     let p = Arc::new(Mutex::new(Pincer::new()));
     let token = CancellationToken::new();
     let d = Daemon::new(p.clone(), token.clone()).await?;
@@ -111,6 +111,7 @@ async fn send_request(req: Request) -> Result<(), Anyhow> {
             );
             e
         })?;
+    debug!("Sending request {req:?}");
     tx.send(req).await.map_err(|e| {
         error!("Could not transmit request: {e}");
         e
