@@ -75,7 +75,7 @@ async fn daemon() -> Result<(), Anyhow> {
     println!("Launching daemon");
     let p = Arc::new(Mutex::new(Pincer::new()));
     let token = CancellationToken::new();
-    let mut d = Daemon::new(p.clone(), token.clone()).await?;
+    let d = Daemon::new(p.clone(), token.clone()).await?;
 
     // TODO use JoinSet here -- three tasks
     // - the clipboard listening

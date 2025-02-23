@@ -70,7 +70,7 @@ impl Daemon {
     }
 
     /// Listen for commands
-    pub async fn listen(&mut self) -> Result<(), Anyhow> {
+    pub async fn listen(&self) -> Result<(), Anyhow> {
         let sock_path = socket_path();
         let _ = std::fs::remove_file(&sock_path);
         let socket = UnixListener::bind(&sock_path).map_err(|e| {
