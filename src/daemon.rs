@@ -173,7 +173,7 @@ impl Drop for Daemon {
         let _ = self
             .lock
             .unlock()
-            .map_err(|e| warn!("Could unlock {}: {e}.", lock_path().to_string_lossy()));
+            .map_err(|e| warn!("Could not unlock {}: {e}.", lock_path().to_string_lossy()));
     }
 }
 
