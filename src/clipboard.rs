@@ -2,6 +2,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
+use std::os::fd::{AsFd, AsRawFd};
 use std::{
     cell::RefCell,
     rc::Rc,
@@ -10,6 +11,7 @@ use std::{
 
 use spdlog::prelude::*;
 
+use tokio::io::unix::AsyncFd;
 use tokio::select;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -38,8 +40,9 @@ use crate::seat::{SeatData, SeatIdentifier};
 /// Struct that interfaces with the Wayland compositor
 #[derive(Debug)]
 pub struct Clipboard {
-    queue: Rc<RefCell<EventQueue<Clipboard>>>,
+    queue: Arc<Mutex<EventQueue<Clipboard>>>,
     pincers: Arc<Mutex<SeatPincerMap>>,
+    conn: Connection,
     manager: ZwlrDataControlManagerV1,
     seats: HashMap<WlSeat, SeatData>,
     offers: HashMap<ZwlrDataControlOfferV1, HashSet<MimeType>>,
@@ -93,10 +96,11 @@ impl Clipboard {
                 .collect()
         });
 
-        let queue = Rc::new(RefCell::new(queue));
+        let queue = Arc::new(Mutex::new(queue));
         let mut clip = Clipboard {
             queue,
             pincers,
+            conn,
             manager,
             seats,
             offers: HashMap::new(),
@@ -107,7 +111,37 @@ impl Clipboard {
         Ok(clip)
     }
 
-    pub fn send<T>(&self, seat: &WlSeat, mime: MimeType, fd: T) -> ()
+    pub async fn listen(&mut self) -> Result<(), Anyhow> {
+        let fd = self.conn.clone();
+        let fd = AsyncFd::new(fd.as_fd()).unwrap();
+        loop {
+            // cloning prevents referencing self
+            let q = self.queue.clone();
+            let read_guard = {
+                let mut q = q.lock().unwrap();
+                let _ = q
+                    .flush()
+                    .map_err(|e| warn!("Wayland communication error: {e}"));
+                let _ = q
+                    .dispatch_pending(self)
+                    .map_err(|e| warn!("Wayland communication error: {e}"));
+                q.prepare_read().unwrap()
+                // lock is released here
+            };
+            select! {
+                _ = self.token.cancelled() => break,
+                _ = async {fd.readable() } => {
+                    let mut q = q.lock().unwrap();
+                    read_guard.read().unwrap();
+                    let _ = q.dispatch_pending(self)
+                        .map_err(|e| warn!("Wayland communication error: {e}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn send<T>(&self, seat: &WlSeat, mime: MimeType, fd: T) -> ()
     where
         T: Into<File>,
     {
@@ -142,9 +176,9 @@ impl Clipboard {
         }
     }
 
-    pub fn grab(&mut self) -> Result<(), Anyhow> {
+    fn grab(&mut self) -> Result<(), Anyhow> {
         // request each seat's data device
-        let qh = self.queue.borrow().handle();
+        let qh = self.queue.lock().unwrap().handle();
         for (seat, data) in &mut self.seats {
             let device = self.manager.get_data_device(seat, &qh, seat.clone());
             data.set_device(Some(device));
@@ -152,7 +186,8 @@ impl Clipboard {
         // round-trip
         let q = self.queue.clone();
         let _ = q
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .roundtrip(self)
             .map_err(|e| error!("Wayland communication error: {e}"));
         // request all the data!
@@ -295,8 +330,7 @@ impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for Clipboard {
             // clipboard anymore
             Cancelled {} => {
                 source.destroy();
-                let q = state.queue.clone();
-                q.borrow_mut().roundtrip(state);
+                let _ = state.grab();
             }
             _ => (),
         }

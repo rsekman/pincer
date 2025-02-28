@@ -83,7 +83,6 @@ async fn daemon() -> Result<(), Anyhow> {
     let token = CancellationToken::new();
     let d = Daemon::new(pincers.clone(), token.clone()).await?;
     let mut cb = Clipboard::new(pincers.clone(), token.clone())?;
-    //cb.grab();
 
     // TODO use JoinSet here -- three tasks
     // - the Clipboard interfacing with Wayland
@@ -91,6 +90,7 @@ async fn daemon() -> Result<(), Anyhow> {
     // - the signal handler waiting for Ctrl-C
     let mut tasks = JoinSet::new();
     tasks.spawn(async move { d.listen().await });
+    tasks.spawn(async move { cb.listen().await });
     let t = token.clone();
     tasks.spawn(async move {
         match ctrl_c().await {
