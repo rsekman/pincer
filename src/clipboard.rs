@@ -35,20 +35,15 @@ use crate::pincer::{Pincer, SeatPincerMap};
 use crate::register::MimeType;
 use crate::seat::{SeatData, SeatIdentifier};
 
-#[derive(Debug)]
-struct State {
-    pincers: Arc<Mutex<SeatPincerMap>>,
-    seats: HashMap<WlSeat, SeatData>,
-    manager: ZwlrDataControlManagerV1,
-    offers: HashMap<ZwlrDataControlOfferV1, HashSet<MimeType>>,
-}
-
 /// Struct that interfaces with the Wayland compositor
 #[derive(Debug)]
 pub struct Clipboard {
-    queue: EventQueue<State>,
+    queue: Rc<RefCell<EventQueue<Clipboard>>>,
+    pincers: Arc<Mutex<SeatPincerMap>>,
+    manager: ZwlrDataControlManagerV1,
+    seats: HashMap<WlSeat, SeatData>,
+    offers: HashMap<ZwlrDataControlOfferV1, HashSet<MimeType>>,
     token: CancellationToken,
-    state: State,
 }
 
 impl Clipboard {
@@ -98,45 +93,20 @@ impl Clipboard {
                 .collect()
         });
 
-        let state = State {
-            pincers,
-            seats,
-            manager,
-            offers: HashMap::new(),
-        };
-
-        Ok(Clipboard {
+        let queue = Rc::new(RefCell::new(queue));
+        let mut clip = Clipboard {
             queue,
+            pincers,
+            manager,
+            seats,
+            offers: HashMap::new(),
             token,
-            state,
-        })
+        };
+        clip.grab()?;
+
+        Ok(clip)
     }
 
-    pub fn grab(&mut self) {
-        // request each seat's data device
-        let qh = self.queue.handle();
-        for (seat, data) in &mut self.state.seats {
-            let device = self.state.manager.get_data_device(seat, &qh, seat.clone());
-            data.set_device(Some(device));
-        }
-        // round-trip
-        let _ = self
-            .queue
-            .roundtrip(&mut self.state)
-            .map_err(|e| error!("Wayland communication error: {e}"));
-        // request all the data!
-        for (_, data) in &self.state.seats {
-            match data.offer.clone() {
-                Some(offer) => debug!("Found offer for seat {data:?} {offer:?}"),
-                None => debug!("No clipboard for seat {data:?}"),
-            }
-        }
-        // round-trip
-        // grab the clipboard
-    }
-}
-
-impl State {
     pub fn send<T>(&self, seat: &WlSeat, mime: MimeType, fd: T) -> ()
     where
         T: Into<File>,
@@ -171,10 +141,35 @@ impl State {
             }
         }
     }
+
+    pub fn grab(&mut self) -> Result<(), Anyhow> {
+        // request each seat's data device
+        let qh = self.queue.borrow().handle();
+        for (seat, data) in &mut self.seats {
+            let device = self.manager.get_data_device(seat, &qh, seat.clone());
+            data.set_device(Some(device));
+        }
+        // round-trip
+        let q = self.queue.clone();
+        let _ = q
+            .borrow_mut()
+            .roundtrip(self)
+            .map_err(|e| error!("Wayland communication error: {e}"));
+        // request all the data!
+        for (_, data) in &self.seats {
+            match data.offer.clone() {
+                Some(offer) => debug!("Found offer for seat {data:?} {offer:?}"),
+                None => debug!("No clipboard for seat {data:?}"),
+            }
+        }
+        // round-trip
+        // grab the clipboard
+        Ok(())
+    }
 }
 
 /// This event is dispatched when a global appears or disappears
-impl Dispatch<WlRegistry, GlobalListContents> for State {
+impl Dispatch<WlRegistry, GlobalListContents> for Clipboard {
     fn event(
         state: &mut Self,
         registry: &WlRegistry,
@@ -224,14 +219,14 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
 }
 
 /// This event is dispatched to notify us of each seat's string name
-impl Dispatch<WlSeat, ()> for State {
+impl Dispatch<WlSeat, ()> for Clipboard {
     fn event(
-        state: &mut State,
+        state: &mut Clipboard,
         seat: &WlSeat,
         event: <WlSeat as wayland_client::Proxy>::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<State>,
+        _qh: &QueueHandle<Clipboard>,
     ) {
         if let wl_seat::Event::Name { name } = event {
             let data = state.seats.get_mut(seat).unwrap();
@@ -246,7 +241,7 @@ impl Dispatch<WlSeat, ()> for State {
     }
 }
 
-impl Dispatch<ZwlrDataControlManagerV1, ()> for State {
+impl Dispatch<ZwlrDataControlManagerV1, ()> for Clipboard {
     fn event(
         _state: &mut Self,
         _proxy: &ZwlrDataControlManagerV1,
@@ -259,7 +254,7 @@ impl Dispatch<ZwlrDataControlManagerV1, ()> for State {
 }
 
 /// Impl for reading the clipboard
-impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for State {
+impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
     fn event(
         state: &mut Self,
         _device: &ZwlrDataControlDeviceV1,
@@ -278,12 +273,12 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for State {
         }
     }
 
-    event_created_child!(State, ZwlrDataControlDeviceV1, [
+    event_created_child!(Clipboard, ZwlrDataControlDeviceV1, [
         zwlr_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (ZwlrDataControlOfferV1, ()),
     ]);
 }
 
-impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for State {
+impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for Clipboard {
     fn event(
         state: &mut Self,
         source: &ZwlrDataControlSourceV1,
@@ -300,6 +295,8 @@ impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for State {
             // clipboard anymore
             Cancelled {} => {
                 source.destroy();
+                let q = state.queue.clone();
+                q.borrow_mut().roundtrip(state);
             }
             _ => (),
         }
@@ -307,7 +304,7 @@ impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for State {
 }
 
 // This event is dispatched to tell us which MIME types are available
-impl Dispatch<ZwlrDataControlOfferV1, ()> for State {
+impl Dispatch<ZwlrDataControlOfferV1, ()> for Clipboard {
     fn event(
         state: &mut Self,
         offer: &ZwlrDataControlOfferV1,

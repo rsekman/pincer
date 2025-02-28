@@ -83,7 +83,7 @@ async fn daemon() -> Result<(), Anyhow> {
     let token = CancellationToken::new();
     let d = Daemon::new(pincers.clone(), token.clone()).await?;
     let mut cb = Clipboard::new(pincers.clone(), token.clone())?;
-    cb.grab();
+    //cb.grab();
 
     // TODO use JoinSet here -- three tasks
     // - the Clipboard interfacing with Wayland
