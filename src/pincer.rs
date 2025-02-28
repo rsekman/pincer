@@ -1,7 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::error::Error;
 use crate::register::{MimeType, NumericT, Register, RegisterAddress, RegisterSummary};
+use crate::seat::SeatIdentifier;
 
 /// Struct for the state of the clipboard manager
 #[derive(Debug)]
@@ -12,11 +13,7 @@ pub struct Pincer {
     named: [Register; 26],
 }
 
-impl Default for Pincer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub type SeatPincerMap = HashMap<SeatIdentifier, Pincer>;
 
 impl Pincer {
     pub fn new() -> Self {
@@ -47,18 +44,30 @@ impl Pincer {
         .unwrap()
     }
 
-    pub fn paste(&self, addr: Option<RegisterAddress>, mime: &String) -> Result<&Vec<u8>, Error> {
+    pub fn get_active(&self) -> RegisterAddress {
+        self.active.unwrap_or_default()
+    }
+
+    pub fn paste_from(
+        &self,
+        addr: Option<RegisterAddress>,
+        mime: &MimeType,
+    ) -> Result<&Vec<u8>, Error> {
         let raw_addr = addr.unwrap_or_default();
         self.register(addr).get(mime).ok_or(format!(
             "Register {raw_addr:?} does not contain MIME type {mime}"
         ))
     }
 
+    pub fn paste(&self, mime: &MimeType) -> Result<&Vec<u8>, Error> {
+        self.paste_from(self.active, mime)
+    }
+
     fn advance_pointer(&mut self) {
         self.pointer = circular_shift(self.pointer, NumericT::new(1).unwrap())
     }
 
-    pub fn yank<T>(&mut self, addr: Option<RegisterAddress>, pastes: T) -> Result<usize, Error>
+    pub fn yank_into<T>(&mut self, addr: Option<RegisterAddress>, pastes: T) -> Result<usize, Error>
     where
         T: Iterator<Item = (MimeType, Vec<u8>)>,
     {
@@ -83,12 +92,19 @@ impl Pincer {
         Ok(bytes)
     }
 
-    pub fn yank_one<T>(
+    pub fn yank_one_into<T>(
         &mut self,
         addr: Option<RegisterAddress>,
         (mime, data): (String, Vec<u8>),
     ) -> Result<usize, Error> {
-        self.yank(addr, std::iter::once((mime, data)))
+        self.yank_into(addr, std::iter::once((mime, data)))
+    }
+
+    pub fn yank<T>(&mut self, pastes: T) -> Result<usize, Error>
+    where
+        T: Iterator<Item = (MimeType, Vec<u8>)>,
+    {
+        self.yank_into(self.active, pastes)
     }
 
     pub fn list(&self) -> Result<BTreeMap<RegisterAddress, RegisterSummary>, Error> {

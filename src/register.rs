@@ -12,7 +12,7 @@ use nom::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Anyhow, Error};
+use crate::error::Anyhow;
 
 const N_NUMERIC: u8 = 10;
 const N_NAMED: u8 = 26;

@@ -1,17 +1,20 @@
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clap::{Args, Parser as ArgParser, Subcommand};
 use spdlog::prelude::*;
-use tokio::{signal::ctrl_c, sync::Mutex, task::JoinSet};
+use tokio::{signal::ctrl_c, task::JoinSet};
 use tokio_unix_ipc::channel_from_std;
 use tokio_util::sync::CancellationToken;
 
 use pincers::clipboard::Clipboard;
-use pincers::daemon::{socket_path, Daemon, RegisterCommand, Request, Response};
+use pincers::daemon::{
+    socket_path, Daemon, RegisterCommand, Request, RequestType, Response, ResponseType,
+};
 use pincers::error::{Anyhow, Error};
-use pincers::pincer::Pincer;
+use pincers::pincer::SeatPincerMap;
 use pincers::register::{RegisterAddress, ADDRESS_HELP};
+use pincers::seat::SeatSpecification;
 
 #[derive(ArgParser)]
 #[command(name = "pincer")]
@@ -75,13 +78,17 @@ struct RegisterArgs {
 
 async fn daemon() -> Result<(), Anyhow> {
     info!("Launching daemon");
-    let p = Arc::new(Mutex::new(Pincer::new()));
+    let pincers = SeatPincerMap::new();
+    let pincers = Arc::new(Mutex::new(pincers));
     let token = CancellationToken::new();
-    let d = Daemon::new(p.clone(), token.clone()).await?;
+    let d = Daemon::new(pincers.clone(), token.clone()).await?;
+    let mut cb = Clipboard::new(pincers.clone(), token.clone())?;
+    cb.grab();
 
     // TODO use JoinSet here -- three tasks
-    // - the clipboard listening
-    //let wl = Clipboard::new(p.clone());
+    // - the Clipboard interfacing with Wayland
+    // - the Daemon handling IPC
+    // - the signal handler waiting for Ctrl-C
     let mut tasks = JoinSet::new();
     tasks.spawn(async move { d.listen().await });
     let t = token.clone();
@@ -125,18 +132,15 @@ async fn send_request(req: Request) -> Result<(), Anyhow> {
 
 fn handle_response(rsp: Response) -> Result<(), Error> {
     debug!("Received response: {rsp:?}");
-    match rsp {
-        Response::Yank(addr, resp) => handle_yank(addr, resp),
+    match rsp? {
+        ResponseType::Yank(addr, resp) => handle_yank(addr, resp),
         _ => Ok(()),
     }
 }
 
-fn handle_yank(addr: RegisterAddress, resp: Result<usize, Error>) -> Result<(), Error> {
-    resp.map(|n| info!("Yanked {n} bytes into {addr}"))
-        .map_err(|e| {
-            warn!("Could not yank into {addr}: {e}");
-            e
-        })
+fn handle_yank(addr: RegisterAddress, n: usize) -> Result<(), Error> {
+    info!("Yanked {n} bytes into {addr}");
+    Ok(())
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -145,16 +149,22 @@ async fn main() -> Result<(), Anyhow> {
     use CliCommands::*;
     spdlog::default_logger().set_level_filter(spdlog::LevelFilter::MoreSevereEqual(args.log_level));
 
-    let _ = match args.command {
+    match args.command {
         Daemon {} => daemon().await,
-        Paste { mime, address } => send_request(Request::Paste(address, mime)).await,
-        Show { address } => send_request(Request::Show(address)).await,
-        List {} => send_request(Request::List()).await,
-        Register(RegisterArgs { command }) => send_request(Request::Register(command)).await,
-        Yank {
-            address: _,
-            mime: _,
-        } => todo!(),
-    };
-    Ok(())
+        c => {
+            let seat = SeatSpecification::Unspecified;
+            let request = match c {
+                Paste { mime, address } => RequestType::Paste(address, mime),
+                Show { address } => RequestType::Show(address),
+                List {} => RequestType::List(),
+                Register(RegisterArgs { command }) => RequestType::Register(command),
+                Yank {
+                    address: _,
+                    mime: _,
+                } => todo!(),
+                Daemon {} => unreachable!(),
+            };
+            send_request(Request { seat, request }).await
+        }
+    }
 }

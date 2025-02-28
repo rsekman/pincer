@@ -11,7 +11,9 @@ fs2 = "0.4.3"
 nom = "8.0.0"
 serde = { version = "1.0.217", features = ["derive"] }
 spdlog-rs = { version = "0.4.1", features = ["release-level-info", "level-trace"] }
-tokio = { version = "1.43.0", features = ["macros", "rt", "signal", "sync"] }
+tokio = { version = "1.43.0", features = ["fs", "io-util", "macros", "rt", "signal", "sync"] }
 tokio-unix-ipc = { version = "0.3.0", features = ["serde"], git = "https://github.com/mitsuhiko/tokio-unix-ipc.git" }
 tokio-util = "0.7.13"
+wayland-client = "0.31.8"
+wayland-protocols-wlr = { version = "0.3.6", features = ["client"] }
 wl-clipboard-rs = "0.9.1"
