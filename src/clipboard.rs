@@ -115,8 +115,6 @@ impl Clipboard {
     }
 
     pub async fn listen(&mut self) -> Result<(), Anyhow> {
-        let fd = self.conn.clone();
-        let fd = AsyncFd::new(fd.as_fd()).unwrap();
         loop {
             // cloning prevents referencing self
             let q = self.queue.clone();
@@ -133,20 +131,29 @@ impl Clipboard {
             };
             select! {
                 _ = self.token.cancelled() => break,
-                _ = async {fd.readable().await } => {
+                read = async move {
+                    {
+                        let conn = read_guard.connection_fd();
+                        let fd = AsyncFd::new(conn.as_fd()).unwrap();
+                        let _ = fd.readable().await;
+                    }
+                    read_guard.read()
+                } => {
                     let mut q = q.lock().unwrap();
-                    match read_guard.read() {
-                        Ok(_) => { let _ = q.dispatch_pending(self); },
-                        Err(WaylandError::Io(e)) => {
-                            if e.kind() != std::io::ErrorKind::WouldBlock {
-                                warn!("Wayland communication error: {e}");
-                            }
-                        },
-                        Err(e) => { warn!("Wayland communication error: {e}"); }
+                    match read {
+                        Ok(n) => {
+                            let _ = q
+                                .dispatch_pending(self)
+                                .map_err(|e| warn!("Wayland communication error: {e}"));
+                        }
+                        Err(e) => {
+                            warn!("Wayland communication error: {e}");
+                        }
                     };
                 }
             }
         }
+
         Ok(())
     }
 
