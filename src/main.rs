@@ -1,3 +1,4 @@
+use std::io::{stdin, stdout, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
@@ -131,8 +132,10 @@ async fn send_request(req: Request) -> Result<(), Anyhow> {
 
 fn handle_response(rsp: Response) -> Result<(), Error> {
     debug!("Received response: {rsp:?}");
+    use ResponseType::*;
     match rsp? {
         ResponseType::Yank(addr, resp) => handle_yank(addr, resp),
+        ResponseType::Paste(_, data) => handle_paste(&data),
         _ => Ok(()),
     }
 }
@@ -140,6 +143,12 @@ fn handle_response(rsp: Response) -> Result<(), Error> {
 fn handle_yank(addr: RegisterAddress, n: usize) -> Result<(), Error> {
     info!("Yanked {n} bytes into {addr}");
     Ok(())
+}
+
+fn handle_paste(data: &Vec<u8>) -> Result<(), Error> {
+    std::io::stdout()
+        .write_all(data)
+        .map_err(|e| format!("I/O error: {e}"))
 }
 
 #[tokio::main(flavor = "current_thread")]
