@@ -9,8 +9,10 @@ bounded-integer = { version = "0.5.8", features = ["num-traits02", "serde1", "ty
 clap = { version = "4.5.29", features = ["derive"] }
 fs2 = "0.4.3"
 nom = "8.0.0"
+os_pipe = "1.2.1"
 serde = { version = "1.0.217", features = ["derive"] }
 spdlog-rs = { version = "0.4.1", features = ["release-level-info", "level-trace"] }
+tempfile = "3.17.1"
 tokio = { version = "1.43.0", features = ["fs", "io-util", "macros", "rt", "signal", "sync"] }
 tokio-unix-ipc = { version = "0.3.0", features = ["serde"], git = "https://github.com/mitsuhiko/tokio-unix-ipc.git" }
 tokio-util = "0.7.13"

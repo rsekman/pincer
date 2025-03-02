@@ -84,14 +84,13 @@ async fn daemon() -> Result<(), Anyhow> {
     let d = Daemon::new(pincers.clone(), token.clone()).await?;
     let mut cb = Clipboard::new(pincers.clone(), token.clone())?;
 
-    // TODO use JoinSet here -- three tasks
+    // Three tasks in the JoinSet:
     // - the Clipboard interfacing with Wayland
     // - the Daemon handling IPC
     // - the signal handler waiting for Ctrl-C
     let mut tasks = JoinSet::new();
     tasks.spawn(async move { d.listen().await });
     tasks.spawn(async move { cb.listen().await });
-    let t = token.clone();
     tasks.spawn(async move {
         match ctrl_c().await {
             Err(e) => warn!("Could not catch Ctrl-C: {e}"),
@@ -99,7 +98,7 @@ async fn daemon() -> Result<(), Anyhow> {
                 info!("Received SIGINT, exiting")
             }
         };
-        t.cancel();
+        token.cancel();
         Ok(())
     });
     tasks.join_all().await;

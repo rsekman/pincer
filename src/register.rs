@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use bounded_integer::BoundedU8;
+use bounded_integer::{BoundedI8, BoundedU8};
 use nom::{
     branch::alt,
     character::complete::satisfy,
@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Anyhow;
 
-const N_NUMERIC: u8 = 10;
+const N_NUMERIC: i8 = 10;
 const N_NAMED: u8 = 26;
 
-pub type NumericT = BoundedU8<0, { N_NUMERIC - 1 }>;
+pub type NumericT = BoundedI8<0, { N_NUMERIC - 1 }>;
 pub type NamedT = BoundedU8<0, { N_NAMED - 1 }>;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Ord, PartialOrd, Eq, PartialEq)]
@@ -32,7 +32,7 @@ impl RegisterAddress {
     }
 
     pub fn iter_numeric() -> impl Iterator<Item = Self> {
-        (0u8..N_NUMERIC).map(|n| Self::Numeric(NumericT::new(n).unwrap()))
+        (0i8..N_NUMERIC).map(|n| Self::Numeric(NumericT::new(n).unwrap()))
     }
 
     pub fn iter_named() -> impl Iterator<Item = Self> {
@@ -42,7 +42,7 @@ impl RegisterAddress {
 
 impl Default for RegisterAddress {
     fn default() -> Self {
-        Self::Numeric(NumericT::new(0u8).unwrap())
+        Self::Numeric(NumericT::new(0i8).unwrap())
     }
 }
 impl Display for RegisterAddress {
@@ -71,7 +71,11 @@ fn ascii_shift(a: char, b: u8) -> Option<char> {
 fn do_parse_address(input: &str) -> IResult<&str, RegisterAddress> {
     alt((
         map(satisfy(|c| c.is_ascii_digit()), |c| {
-            RegisterAddress::Numeric(ascii_distance(c, '0').and_then(NumericT::new).unwrap())
+            RegisterAddress::Numeric(
+                ascii_distance(c, '0')
+                    .and_then(|d| NumericT::new(d as i8))
+                    .unwrap(),
+            )
         }),
         map(satisfy(|c| c.is_ascii_lowercase()), |c| {
             RegisterAddress::Named(ascii_distance(c, 'a').and_then(NamedT::new).unwrap())

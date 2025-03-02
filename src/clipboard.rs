@@ -1,13 +1,15 @@
 #![allow(unused_imports, unused_variables, dead_code)]
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Error as IOError, Read, Write};
 use std::os::fd::{AsFd, AsRawFd};
 use std::{
     cell::RefCell,
     rc::Rc,
     sync::{Arc, Mutex},
 };
+
+use os_pipe::{pipe, PipeReader};
 
 use spdlog::prelude::*;
 
@@ -17,6 +19,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
 use wayland_client::{
+    backend::WaylandError,
     event_created_child,
     globals::{registry_queue_init, BindError, GlobalError, GlobalListContents},
     protocol::{
@@ -45,7 +48,7 @@ pub struct Clipboard {
     conn: Connection,
     manager: ZwlrDataControlManagerV1,
     seats: HashMap<WlSeat, SeatData>,
-    offers: HashMap<ZwlrDataControlOfferV1, HashSet<MimeType>>,
+    offers: HashMap<ZwlrDataControlOfferV1, HashMap<MimeType, PipeReader>>,
     token: CancellationToken,
 }
 
@@ -130,11 +133,17 @@ impl Clipboard {
             };
             select! {
                 _ = self.token.cancelled() => break,
-                _ = async {fd.readable() } => {
+                _ = async {fd.readable().await } => {
                     let mut q = q.lock().unwrap();
-                    read_guard.read().unwrap();
-                    let _ = q.dispatch_pending(self)
-                        .map_err(|e| warn!("Wayland communication error: {e}"));
+                    match read_guard.read() {
+                        Ok(_) => { let _ = q.dispatch_pending(self); },
+                        Err(WaylandError::Io(e)) => {
+                            if e.kind() != std::io::ErrorKind::WouldBlock {
+                                warn!("Wayland communication error: {e}");
+                            }
+                        },
+                        Err(e) => { warn!("Wayland communication error: {e}"); }
+                    };
                 }
             }
         }
@@ -183,23 +192,71 @@ impl Clipboard {
             let device = self.manager.get_data_device(seat, &qh, seat.clone());
             data.set_device(Some(device));
         }
-        // round-trip
-        let q = self.queue.clone();
-        let _ = q
-            .lock()
-            .unwrap()
-            .roundtrip(self)
-            .map_err(|e| error!("Wayland communication error: {e}"));
+
+        // After this round-trip we will know about all MIME types and have sent requests for them
+        // ...
+        self.roundtrip()?;
+        // ... and after this round-trip the compositor will have written the data to the pipes
+        self.roundtrip()?;
+
         // request all the data!
-        for (_, data) in &self.seats {
-            match data.offer.clone() {
-                Some(offer) => debug!("Found offer for seat {data:?} {offer:?}"),
-                None => debug!("No clipboard for seat {data:?}"),
-            }
+        let xs: Vec<_> = self
+            .seats
+            .iter()
+            .filter_map(|(_, data)| Option::zip(data.name.clone(), data.offer.clone()))
+            // have to collect rather than use the iterator directly because the iterator will have
+            // an immutable borrow of self
+            .collect();
+        for (name, offer) in xs {
+            self.yank_from_selection(&name, &offer)?;
         }
+
         // round-trip
         // grab the clipboard
         Ok(())
+    }
+
+    fn yank_from_selection(
+        &mut self,
+        seat: &SeatIdentifier,
+        offer: &ZwlrDataControlOfferV1,
+    ) -> Result<(), Anyhow> {
+        let mimes = self
+            .offers
+            .get(offer)
+            .ok_or(anyhow::Error::msg("Offer {offer:?} not registered"))?;
+        let mut pincers = self.pincers.lock().unwrap();
+        let pincer = pincers.get_mut(seat).ok_or_else(|| {
+            error!("No pincer");
+            anyhow::Error::msg("No pincer found for {seat:?}")
+        })?;
+
+        let read_data = |(mime, mut f): (&String, &PipeReader)| {
+            let mut data = Vec::new();
+            match f.read_to_end(&mut data) {
+                Ok(n) => {
+                    debug!("Read {n} bytes of MIME {mime}");
+                    Some((mime.clone(), data))
+                }
+                Err(e) => {
+                    error!("While trying to yank data of MIME {mime}, could not read data from {f:?}: {e}");
+                    None
+                }
+            }
+        };
+        pincer
+            .yank(mimes.iter().filter_map(read_data))
+            .map(|_| {})
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn roundtrip(&mut self) -> Result<(), Anyhow> {
+        let q = self.queue.clone();
+        let res = q.lock().unwrap().roundtrip(self);
+        res.map(|_| {}).map_err(|e| {
+            error!("Wayland communication error: {e}");
+            anyhow::Error::new(e)
+        })
     }
 }
 
@@ -266,9 +323,11 @@ impl Dispatch<WlSeat, ()> for Clipboard {
         if let wl_seat::Event::Name { name } = event {
             let data = state.seats.get_mut(seat).unwrap();
             data.set_name(name.clone());
+            debug!("Registered seat {data:?}");
             let mut pincers = state.pincers.lock().unwrap();
             if !pincers.contains_key(&name) {
                 pincers.insert(name, Pincer::new());
+                info!("Managing clipboard for {data:?}");
             } else {
                 warn!("Clipboard of seat {data:?} already managed");
             }
@@ -288,7 +347,6 @@ impl Dispatch<ZwlrDataControlManagerV1, ()> for Clipboard {
     }
 }
 
-/// Impl for reading the clipboard
 impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
     fn event(
         state: &mut Self,
@@ -300,11 +358,30 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
     ) {
         use zwlr_data_control_device_v1::Event::*;
         match event {
+            // This event is dispatched to notify us of a Device's Offer,
             DataOffer { id } => {
-                debug!("Received a data offer {id:?} on seat {seat:?}");
-                state.seats.get_mut(seat).map(|d| d.set_offer(Some(id)));
+                debug!("Data offer {id:?} introduced on seat {seat:?}");
+                state
+                    .seats
+                    .get_mut(seat)
+                    .map(|d| d.set_offer(Some(id.clone())));
+                state.offers.insert(id, HashMap::new());
             }
-            _ => warn!("TODO: Handle zwlr_data_control_offer_v1 events other than data_offer!"),
+            // This event is dispatched after we have received all the MIME types for the offer
+            // indicated
+            Selection { id: Some(offer) } => {
+                debug!("Selection {offer:?} set on seat {seat:?}");
+            }
+            // This event is dispatched to indicate that the selection is no longer valid
+            Selection { id: None } => {
+                debug!("Selection on seat {seat:?} no longer valid");
+                state.seats.get_mut(seat).map(|d| d.set_offer(None));
+            }
+            // This event is dispatched to notify us that this device is no longer valid
+            Finished {} => {
+                state.seats.get_mut(seat).map(|d| d.set_device(None));
+            }
+            _ => {}
         }
     }
 
@@ -313,6 +390,7 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
     ]);
 }
 
+/// This event is dispatched
 impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for Clipboard {
     fn event(
         state: &mut Self,
@@ -348,8 +426,17 @@ impl Dispatch<ZwlrDataControlOfferV1, ()> for Clipboard {
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
         if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {
-            info!("MIME type {mime_type} is available from offer {offer:?}");
-            //todo!("Implement saving available MIME types")
+            debug!("MIME type {mime_type} is available from offer {offer:?}");
+            match pipe() {
+                Ok((reader, writer)) => {
+                    offer.receive(mime_type.clone(), writer.as_fd());
+                    state
+                        .offers
+                        .get_mut(offer)
+                        .map(|o| o.insert(mime_type, reader));
+                }
+                Err(e) => error!("Could not create fipe to receive data: {e}"),
+            }
         }
     }
 }

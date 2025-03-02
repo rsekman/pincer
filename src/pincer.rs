@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
+use spdlog::prelude::*;
+
 use crate::error::Error;
 use crate::register::{MimeType, NumericT, Register, RegisterAddress, RegisterSummary};
 use crate::seat::SeatIdentifier;
@@ -38,7 +40,7 @@ impl Pincer {
         match addr {
             Numeric(n) => self
                 .numeric
-                .get(circular_shift(n, self.pointer).get() as usize),
+                .get(shift_backward(n, self.pointer).get() as usize),
             Named(n) => self.named.get(n.get() as usize),
         }
         .unwrap()
@@ -64,7 +66,7 @@ impl Pincer {
     }
 
     fn advance_pointer(&mut self) {
-        self.pointer = circular_shift(self.pointer, NumericT::new(1).unwrap())
+        self.pointer = shift_forward(self.pointer, NumericT::new(1).unwrap())
     }
 
     pub fn yank_into<T>(&mut self, addr: Option<RegisterAddress>, pastes: T) -> Result<usize, Error>
@@ -73,10 +75,13 @@ impl Pincer {
     {
         use RegisterAddress::*;
         let addr = addr.unwrap_or_default();
+        if let Numeric(_) = addr {
+            self.advance_pointer();
+        }
         let reg = match addr {
             Numeric(n) => self
                 .numeric
-                .get_mut(circular_shift(n, self.pointer).get() as usize),
+                .get_mut(shift_backward(n, self.pointer).get() as usize),
             Named(n) => self.named.get_mut(n.get() as usize),
         }
         .unwrap();
@@ -86,9 +91,8 @@ impl Pincer {
             bytes += data.len();
             reg.insert(mime, data);
         }
-        if let Numeric(_) = addr {
-            self.advance_pointer();
-        }
+
+        debug!("Yanked {bytes} bytes into {addr}");
         Ok(bytes)
     }
 
@@ -126,6 +130,12 @@ impl Pincer {
     }
 }
 
-fn circular_shift(x: NumericT, y: NumericT) -> NumericT {
-    (x + y).rem_euclid(NumericT::MAX_VALUE + 1)
+fn shift_forward(x: NumericT, y: NumericT) -> NumericT {
+    let z = (x.get() + y.get()).rem_euclid(NumericT::MAX_VALUE + 1);
+    NumericT::new(z).unwrap()
+}
+
+fn shift_backward(x: NumericT, y: NumericT) -> NumericT {
+    let z = (x.get() - y.get()).rem_euclid(NumericT::MAX_VALUE + 1);
+    NumericT::new(z).unwrap()
 }
