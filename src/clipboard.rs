@@ -368,25 +368,34 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
             // This event is dispatched to notify us of a Device's Offer,
             DataOffer { id } => {
                 debug!("Data offer {id:?} introduced on seat {seat:?}");
-                state
-                    .seats
-                    .get_mut(seat)
-                    .map(|d| d.set_offer(Some(id.clone())));
                 state.offers.insert(id, HashMap::new());
             }
             // This event is dispatched after we have received all the MIME types for the offer
-            // indicated
-            Selection { id: Some(offer) } => {
-                debug!("Selection {offer:?} set on seat {seat:?}");
-            }
-            // This event is dispatched to indicate that the selection is no longer valid
-            Selection { id: None } => {
-                debug!("Selection on seat {seat:?} no longer valid");
-                state.seats.get_mut(seat).map(|d| d.set_offer(None));
+            // indicated, or when the selection is unset
+            Selection { id } => {
+                if let Some(ref offer) = id {
+                    debug!("Selection {offer:?} set on seat {seat:?}");
+                } else {
+                    debug!("Selection on seat {seat:?} no longer valid");
+                }
+                let Some(seat) = state.seats.get_mut(seat) else {
+                    return;
+                };
+                // The protocol demands that the previous offer will be destroyed; this will happen
+                // automatically because our proxies are dropped after these calls
+                seat.offer.as_ref().map(|o| state.offers.remove(o));
+                seat.set_offer(id);
             }
             // This event is dispatched to notify us that this device is no longer valid
             Finished {} => {
-                state.seats.get_mut(seat).map(|d| d.set_device(None));
+                let Some(seat) = state.seats.get_mut(seat) else {
+                    return;
+                };
+                if let Some(ref offer) = seat.offer {
+                    state.offers.remove(offer);
+                }
+                seat.set_device(None);
+                seat.set_offer(None);
             }
             _ => {}
         }
