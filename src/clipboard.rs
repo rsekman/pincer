@@ -129,16 +129,17 @@ impl Clipboard {
                 q.prepare_read().unwrap()
                 // lock is released here
             };
+            let poll_wl = async move {
+                {
+                    let conn = read_guard.connection_fd();
+                    let fd = AsyncFd::new(conn.as_fd()).unwrap();
+                    let _ = fd.readable().await;
+                }
+                read_guard.read()
+            };
             select! {
                 _ = self.token.cancelled() => break,
-                read = async move {
-                    {
-                        let conn = read_guard.connection_fd();
-                        let fd = AsyncFd::new(conn.as_fd()).unwrap();
-                        let _ = fd.readable().await;
-                    }
-                    read_guard.read()
-                } => {
+                read = poll_wl => {
                     let mut q = q.lock().unwrap();
                     match read {
                         Ok(n) => {
