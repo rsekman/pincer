@@ -16,30 +16,27 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{Anyhow, Error};
 use crate::pincer::{Pincer, SeatPincerMap};
-use crate::register::{Register, RegisterAddress, RegisterSummary, ADDRESS_HELP};
+use crate::register::{MimeType, Register, RegisterAddress, RegisterSummary, ADDRESS_HELP};
 use crate::seat::SeatSpecification;
 
 const SOCKET_NAME: &str = "socket";
 const LOCK_NAME: &str = "lock";
 
-/// Struct for receiving commands over a socket
-// The Daemon struct and the Clipboard struct both contain Arc<Mutex<_>> of the manager state. This
-// is a minimal form of the message passing pattern for sharing state; each acquires the lock only
-// when they need to access the state. listen() cannot be methods on the state directly; that would
-// cause deadlocks as both need to acquire the lock
+/// Struct for receiving commands over an IPC socket
 #[derive(Debug)]
 pub struct Daemon {
     pincers: Arc<Mutex<SeatPincerMap>>,
-    token: CancellationToken,
     lock: File,
 }
 
 impl Daemon {
-    /// Create a new Daemon
-    pub async fn new(
-        pincers: Arc<Mutex<SeatPincerMap>>,
-        token: CancellationToken,
-    ) -> Result<Daemon, Anyhow> {
+    /// Create a new `Daemon`
+    ///
+    /// # Arguments
+    ///
+    /// * `pincers` - Reference to the pool of [Pincers](Pincer) to be shared between this Daemon instance
+    /// and a [`Clipboard`](crate::clipboard::Clipboard) instance
+    pub async fn new(pincers: Arc<Mutex<SeatPincerMap>>) -> Result<Daemon, Anyhow> {
         let dir = get_directory();
         create_dir_all(&dir)
             .or_else(|e| match e.kind() {
@@ -63,15 +60,15 @@ impl Daemon {
             e
         })?;
 
-        Ok(Daemon {
-            pincers,
-            token,
-            lock,
-        })
+        Ok(Daemon { pincers, lock })
     }
 
-    /// Listen for commands
-    pub async fn listen(&self) -> Result<(), Anyhow> {
+    /// Listen for commands from clients
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - A [`CancellationToken`] that can be used to cancel listening
+    pub async fn listen(&self, token: CancellationToken) -> Result<(), Anyhow> {
         let sock_path = socket_path();
         let _ = std::fs::remove_file(&sock_path);
         let socket = UnixListener::bind(&sock_path).map_err(|e| {
@@ -84,11 +81,11 @@ impl Daemon {
 
         loop {
             select! {
-                _ = self.token.cancelled() => break Ok(()),
+                _ = token.cancelled() => break Ok(()),
                 conn  = socket.accept() => match conn  {
                     Ok((stream, _)) => {
                         let p = self.pincers.clone();
-                        let t = self.token.clone();
+                        let t = token.clone();
                         tokio::spawn(async move { Self::accept(stream, p, t).await });
                     },
                     Err(e) => { error!("{e}"); break Err(Anyhow::new(e)) }
@@ -218,6 +215,7 @@ fn get_directory() -> PathBuf {
     dir
 }
 
+/// Get the path to the socket on which a [`Daemon`] will be listening
 pub fn socket_path() -> PathBuf {
     let mut dir = get_directory();
     dir.push(SOCKET_NAME);
@@ -230,40 +228,64 @@ fn lock_path() -> PathBuf {
     dir
 }
 
+/// Commands that manipulate the Daemon's register pointer
 #[derive(Serialize, Deserialize, Subcommand, Debug)]
 pub enum RegisterCommand {
+    /// Command to set the Daemon's register pointer
     Select {
         #[arg(help = ADDRESS_HELP)]
+        /// What the register pointer should be set to
         address: RegisterAddress,
     },
+    /// Command to get the Daemon's register pointer
     Active {},
+    /// Command to clear the Daemon's register pointer
     Clear {},
 }
 
+/// A request to the [`Daemon`]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request {
+    /// The seat to which the request applies
     pub seat: SeatSpecification,
+    /// The type of the request, and its arguments, if any
     pub request: RequestType,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-/// Possible requests to the daemon
+/// Possible requests to a [`Daemon`]. Each variant has a corresponding [`ResponseType`] variant for
+/// the response from the [`Daemon`].
 pub enum RequestType {
+    /// Yank into the the specified register address, or into `"0` if None
     Yank(Option<RegisterAddress>, Register),
-    Paste(Option<RegisterAddress>, String),
+    /// Paste from the the specified register address, or from `"0` if None, requesting a specific
+    /// MIME type
+    Paste(Option<RegisterAddress>, MimeType),
+    /// Show all the contents of the specified register address, or of `"0` if None
     Show(Option<RegisterAddress>),
+    /// Like [`Show`](RequestType::Show), but for all registers
     List(),
+    /// Manipulate the [`Daemon`]'s register pointer
     Register(RegisterCommand),
 }
 
+/// A response from the [`Daemon`]. An `Ok` variant if the request completed sucessfully, otherwise
+/// an `Err` containing an error message.
 pub type Response = Result<ResponseType, Error>;
 
 #[derive(Serialize, Deserialize, Debug)]
-/// Possible responses from the daemon
+/// Possible responses from the daemon. Each variant is the response to a corresponding
+/// [`RequestType`] variant.
 pub enum ResponseType {
+    /// Contains the register address into which the data was yanked, and the total number of bytes
+    /// yanked.
     Yank(RegisterAddress, usize),
+    /// Contains the register address from the which data was pasted, and a buffer for the data
     Paste(RegisterAddress, Vec<u8>),
+    /// Contains the register address which shown, and a map of MIME types to data buffers
     Show(RegisterAddress, Register),
+    /// Contains a map of register addresses to summaries of their contents
     List(BTreeMap<RegisterAddress, RegisterSummary>),
+    /// Contains the [`Daemon`]'s new register pointer
     Register(RegisterAddress),
 }

@@ -9,13 +9,18 @@ use wayland_protocols_wlr::data_control::v1::client::{
 
 pub(crate) type SeatIdentifier = String;
 
+/// Enum for which Seat a command should apply to
 #[derive(Default, Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 pub enum SeatSpecification {
     #[default]
+    /// The command applies to the first seat encountered
     Unspecified,
+    /// The command applies to the seat with this name
     Specified(SeatIdentifier),
 }
 
+/// Struct containing data relating to [`WlSeat`], for internal use by the
+/// [`Clipboard`](crate::clipboard::Clipboard)
 #[derive(Default)]
 pub(crate) struct SeatData {
     /// The name of this seat, if any.

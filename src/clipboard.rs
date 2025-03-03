@@ -49,14 +49,16 @@ pub struct Clipboard {
     manager: ZwlrDataControlManagerV1,
     seats: HashMap<WlSeat, SeatData>,
     offers: HashMap<ZwlrDataControlOfferV1, HashMap<MimeType, PipeReader>>,
-    token: CancellationToken,
 }
 
 impl Clipboard {
-    pub fn new(
-        pincers: Arc<Mutex<SeatPincerMap>>,
-        token: CancellationToken,
-    ) -> Result<Self, Anyhow> {
+    /// Create a new `Clipboard` instance that is connected to the Wayland compositor.
+    ///
+    /// # Arguments
+    ///
+    /// * `pincers` - Reference to the pool of Pincers to be shared between this `Clipboard` and a
+    /// [`Daemon`](crate::daemon::Daemon) instance
+    pub fn new(pincers: Arc<Mutex<SeatPincerMap>>) -> Result<Self, Anyhow> {
         // Connect to the Wayland compositor
         let conn = Connection::connect_to_env()
             .map_err(log_and_pass_on!("Could not connect to to Wayland"))?;
@@ -107,14 +109,18 @@ impl Clipboard {
             manager,
             seats,
             offers: HashMap::new(),
-            token,
         };
         clip.grab()?;
 
         Ok(clip)
     }
 
-    pub async fn listen(&mut self) -> Result<(), Anyhow> {
+    /// Start listening to events from the Wayland compositor
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - A [`CancellationToken`] that can be used to cancel listening
+    pub async fn listen(&mut self, token: CancellationToken) -> Result<(), Anyhow> {
         loop {
             // cloning prevents referencing self
             let q = self.queue.clone();
@@ -138,7 +144,7 @@ impl Clipboard {
                 read_guard.read()
             };
             select! {
-                _ = self.token.cancelled() => break,
+                _ = token.cancelled() => break,
                 read = poll_wl => {
                     let mut q = q.lock().unwrap();
                     match read {
@@ -268,7 +274,7 @@ impl Clipboard {
     }
 }
 
-/// This event is dispatched when a global appears or disappears
+/// Events are dispatched on the [`WlRegistry`] when global objects appear or disappear
 impl Dispatch<WlRegistry, GlobalListContents> for Clipboard {
     fn event(
         state: &mut Self,
@@ -318,7 +324,9 @@ impl Dispatch<WlRegistry, GlobalListContents> for Clipboard {
     }
 }
 
-/// This event is dispatched to notify us of each seat's string name
+/// Events are dispatched on a [`WlSeat`] to notify us of its (string) name and its capabilities (input
+/// devices) We only care about the name. A [`Pincer`] instance is created for each seat, accessed by
+/// name.
 impl Dispatch<WlSeat, ()> for Clipboard {
     fn event(
         state: &mut Clipboard,
@@ -343,6 +351,8 @@ impl Dispatch<WlSeat, ()> for Clipboard {
     }
 }
 
+/// This impl is necessary to satisfy trait bounds, but
+/// [`ZwlrDataControlManager`](ZwlrDataControlManagerV1) has no events, so it can be a no-op.
 impl Dispatch<ZwlrDataControlManagerV1, ()> for Clipboard {
     fn event(
         _state: &mut Self,
@@ -355,6 +365,11 @@ impl Dispatch<ZwlrDataControlManagerV1, ()> for Clipboard {
     }
 }
 
+/// The [`ZwlrDataControlDevice`](ZwlrDataControlDeviceV1) emits events when a selection appears or disappears.
+/// * The [`DataOffer`](zwlr_data_control_device_v1::Event::DataOffer) event signifies that the Device has data to offer, i.e. that seat has copied
+/// something.
+/// * The [`Selection`](zwlr_data_control_device_v1::Event::Selection) event is emitted when the seat's selection is set or unset
+/// * The [`Finished`](zwlr_data_control_device_v1::Event::Finished) event notifies us that the seat no longer has a valid offer
 impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
     fn event(
         state: &mut Self,
@@ -366,7 +381,8 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
     ) {
         use zwlr_data_control_device_v1::Event::*;
         match event {
-            // This event is dispatched to notify us of a Device's Offer,
+            // This event is dispatched to notify us of a Device's Offer. We handle it by preparing
+            // a new MIME -> buffer map for the offer.
             DataOffer { id } => {
                 debug!("Data offer {id:?} introduced on seat {seat:?}");
                 state.offers.insert(id, HashMap::new());
@@ -383,11 +399,13 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
                     return;
                 };
                 // The protocol demands that the previous offer will be destroyed; this will happen
-                // automatically because our proxies are dropped after these calls
+                // automatically because after these calls we no longer hold any references to our
+                // proxies.
                 seat.offer.as_ref().map(|o| state.offers.remove(o));
                 seat.set_offer(id);
             }
-            // This event is dispatched to notify us that this device is no longer valid
+            // This event is dispatched to notify us that this device is no longer valid. We need
+            // to drop references to it and its offer, if any.
             Finished {} => {
                 let Some(seat) = state.seats.get_mut(seat) else {
                     return;
@@ -407,7 +425,11 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
     ]);
 }
 
-/// This event is dispatched
+/// A [`ZwlrDataControlSource`](ZwlrDataControlSourceV1) represents data that another client can
+/// request to paste. It receives
+/// * The [`Send`](zwlr_data_control_source_v1::Event::Send) event when another client wants to paste
+/// * The [`Cancelled`](zwlr_data_control_source_v1::Event::Cancelled) event when another client has
+/// taken over the clipboard (i.e., someone else has copied).
 impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for Clipboard {
     fn event(
         state: &mut Self,
@@ -419,10 +441,11 @@ impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for Clipboard {
     ) {
         use zwlr_data_control_source_v1::Event::*;
         match event {
-            // This event is received when someone wants to paste
+            // This event is received when someone wants to paste our data. We are provided with a
+            // file descriptor and simply write the data to it.
             Send { mime_type, fd } => state.send(seat, mime_type, fd),
-            // This event is received when someone else has copied, because now we don't own the
-            // clipboard anymore
+            // This event is received when someone else has copied to indicate that we now don't own the
+            // clipboard. We need to grab the clipboard back and receive the new newly copied data.
             Cancelled {} => {
                 source.destroy();
                 let _ = state.grab();
@@ -432,7 +455,10 @@ impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for Clipboard {
     }
 }
 
-// This event is dispatched to tell us which MIME types are available
+/// A [`ZwlrDataControlOffer`](ZwlrDataControlOfferV1) represents data that we can request from
+/// another client, i.e., something that we can paste. It receives
+/// [`Offer`](zwlr_data_control_offer_v1::Event::Offer) events to notify us of which MIME types are
+/// available.
 impl Dispatch<ZwlrDataControlOfferV1, ()> for Clipboard {
     fn event(
         state: &mut Self,
@@ -442,18 +468,24 @@ impl Dispatch<ZwlrDataControlOfferV1, ()> for Clipboard {
         _conn: &wayland_client::Connection,
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
-        if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {
-            debug!("MIME type {mime_type} is available from offer {offer:?}");
-            match pipe() {
-                Ok((reader, writer)) => {
-                    offer.receive(mime_type.clone(), writer.as_fd());
-                    state
-                        .offers
-                        .get_mut(offer)
-                        .map(|o| o.insert(mime_type, reader));
+        use zwlr_data_control_offer_v1::Event::*;
+        match event {
+            Offer { mime_type } => {
+                debug!("MIME type {mime_type} is available from offer {offer:?}");
+                // Create a new pipe through which we can receive the data for this MIME type, then
+                // request that data.
+                match pipe() {
+                    Ok((reader, writer)) => {
+                        offer.receive(mime_type.clone(), writer.as_fd());
+                        state
+                            .offers
+                            .get_mut(offer)
+                            .map(|o| o.insert(mime_type, reader));
+                    }
+                    Err(e) => error!("Could not create fipe to receive data: {e}"),
                 }
-                Err(e) => error!("Could not create fipe to receive data: {e}"),
             }
+            _ => {}
         }
     }
 }
