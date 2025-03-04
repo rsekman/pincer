@@ -35,7 +35,7 @@ impl Daemon {
     /// # Arguments
     ///
     /// * `pincers` - Reference to the pool of [Pincers](Pincer) to be shared between this Daemon instance
-    /// and a [`Clipboard`](crate::clipboard::Clipboard) instance
+    ///   and a [`Clipboard`](crate::clipboard::Clipboard) instance
     pub async fn new(pincers: Arc<Mutex<SeatPincerMap>>) -> Result<Daemon, Anyhow> {
         let dir = get_directory();
         create_dir_all(&dir)

@@ -214,6 +214,12 @@ impl Pincer {
     }
 }
 
+impl Default for Pincer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn shift_forward(x: NumericT, y: NumericT) -> NumericT {
     let z = (x.get() + y.get()).rem_euclid(NumericT::MAX_VALUE + 1);
     NumericT::new(z).unwrap()

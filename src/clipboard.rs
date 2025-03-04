@@ -1,5 +1,5 @@
 #![allow(unused_imports, unused_variables, dead_code)]
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Error as IOError, Read, Write};
 use std::os::fd::{AsFd, AsRawFd};
@@ -57,7 +57,7 @@ impl Clipboard {
     /// # Arguments
     ///
     /// * `pincers` - Reference to the pool of Pincers to be shared between this `Clipboard` and a
-    /// [`Daemon`](crate::daemon::Daemon) instance
+    ///   [`Daemon`](crate::daemon::Daemon) instance
     pub fn new(pincers: Arc<Mutex<SeatPincerMap>>) -> Result<Self, Anyhow> {
         // Connect to the Wayland compositor
         let conn = Connection::connect_to_env()
@@ -94,8 +94,10 @@ impl Clipboard {
                 })
                 .map(|global| {
                     let seat = registry.bind(global.name, 2, qh, ());
-                    let mut sd = SeatData::default();
-                    sd.numeric_name = global.name;
+                    let sd = SeatData {
+                        numeric_name: global.name,
+                        ..Default::default()
+                    };
                     (seat, sd)
                 })
                 .collect()
@@ -164,7 +166,7 @@ impl Clipboard {
         Ok(())
     }
 
-    fn send<T>(&self, seat: &WlSeat, mime: MimeType, fd: T) -> ()
+    fn send<T>(&self, seat: &WlSeat, mime: MimeType, fd: T)
     where
         T: Into<File>,
     {
@@ -296,8 +298,10 @@ impl Dispatch<WlRegistry, GlobalListContents> for Clipboard {
                 if interface == WlSeat::interface().name && version >= 2 {
                     info!("Seat #{name} appeared, preparing to manage its clipboard");
                     let seat = registry.bind(name, 2, qhandle, ());
-                    let mut sd = SeatData::default();
-                    sd.numeric_name = name;
+                    let sd = SeatData {
+                        numeric_name: name,
+                        ..Default::default()
+                    };
                     state.seats.insert(seat, sd);
                 }
             }
@@ -308,14 +312,14 @@ impl Dispatch<WlRegistry, GlobalListContents> for Clipboard {
                 {
                     info!("Seat {seat_data:?} disappeared, un-managing its clipboard");
                     let mut pincers = state.pincers.lock().unwrap();
-                    let _ = seat_data
+                    if seat_data
                         .name
                         .as_ref()
                         .and_then(|n| pincers.remove(n))
-                        .map(|_| ())
-                        .ok_or(warn!(
-                        "Tried to unmanage clipboard of seat {seat_data:?}, but it was not managed"
-                    ));
+                        .is_none()
+                    {
+                        warn!("Tried to unmanage clipboard of seat {seat_data:?}, but it was not managed");
+                    }
                 }
                 state.seats.retain(|_, sd| sd.numeric_name != name);
             }
@@ -341,8 +345,8 @@ impl Dispatch<WlSeat, ()> for Clipboard {
             data.set_name(name.clone());
             debug!("Registered seat {data:?}");
             let mut pincers = state.pincers.lock().unwrap();
-            if !pincers.contains_key(&name) {
-                pincers.insert(name, Pincer::new());
+            if let Entry::Vacant(e) = pincers.entry(name) {
+                e.insert(Pincer::new());
                 info!("Managing clipboard for {data:?}");
             } else {
                 warn!("Clipboard of seat {data:?} already managed");
@@ -367,7 +371,7 @@ impl Dispatch<ZwlrDataControlManagerV1, ()> for Clipboard {
 
 /// The [`ZwlrDataControlDevice`](ZwlrDataControlDeviceV1) emits events when a selection appears or disappears.
 /// * The [`DataOffer`](zwlr_data_control_device_v1::Event::DataOffer) event signifies that the Device has data to offer, i.e. that seat has copied
-/// something.
+///   something.
 /// * The [`Selection`](zwlr_data_control_device_v1::Event::Selection) event is emitted when the seat's selection is set or unset
 /// * The [`Finished`](zwlr_data_control_device_v1::Event::Finished) event notifies us that the seat no longer has a valid offer
 impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
@@ -429,7 +433,7 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
 /// request to paste. It receives
 /// * The [`Send`](zwlr_data_control_source_v1::Event::Send) event when another client wants to paste
 /// * The [`Cancelled`](zwlr_data_control_source_v1::Event::Cancelled) event when another client has
-/// taken over the clipboard (i.e., someone else has copied).
+///   taken over the clipboard (i.e., someone else has copied).
 impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for Clipboard {
     fn event(
         state: &mut Self,
@@ -469,6 +473,7 @@ impl Dispatch<ZwlrDataControlOfferV1, ()> for Clipboard {
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
         use zwlr_data_control_offer_v1::Event::*;
+        #[allow(clippy::single_match)]
         match event {
             Offer { mime_type } => {
                 debug!("MIME type {mime_type} is available from offer {offer:?}");

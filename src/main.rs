@@ -136,8 +136,8 @@ fn handle_response(rsp: Response) -> Result<(), Error> {
     debug!("Received response: {rsp:?}");
     use ResponseType::*;
     match rsp? {
-        ResponseType::Yank(addr, resp) => handle_yank(addr, resp),
-        ResponseType::Paste(_, data) => handle_paste(&data),
+        Yank(addr, resp) => handle_yank(addr, resp),
+        Paste(_, data) => handle_paste(&data),
         _ => Ok(()),
     }
 }
@@ -147,7 +147,7 @@ fn handle_yank(addr: RegisterAddress, n: usize) -> Result<(), Error> {
     Ok(())
 }
 
-fn handle_paste(data: &Vec<u8>) -> Result<(), Error> {
+fn handle_paste(data: &[u8]) -> Result<(), Error> {
     std::io::stdout()
         .write_all(data)
         .map_err(|e| format!("I/O error: {e}"))
