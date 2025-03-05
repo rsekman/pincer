@@ -1,13 +1,8 @@
-#![allow(unused_imports, unused_variables, dead_code)]
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap};
 use std::fs::File;
-use std::io::{Error as IOError, Read, Write};
-use std::os::fd::{AsFd, AsRawFd};
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    sync::{Arc, Mutex},
-};
+use std::io::{Read, Write};
+use std::os::fd::AsFd;
+use std::sync::{Arc, Mutex};
 
 use os_pipe::{pipe, PipeReader};
 
@@ -15,27 +10,26 @@ use spdlog::prelude::*;
 
 use tokio::io::unix::AsyncFd;
 use tokio::select;
-use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use wayland_client::{
-    backend::WaylandError,
     event_created_child,
-    globals::{registry_queue_init, BindError, GlobalError, GlobalListContents},
+    globals::{registry_queue_init, GlobalListContents},
     protocol::{
         wl_registry::{self, WlRegistry},
         wl_seat::{self, WlSeat},
     },
-    ConnectError, Connection, Dispatch, DispatchError, EventQueue, Proxy, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_device_v1::{self, ZwlrDataControlDeviceV1},
-    zwlr_data_control_manager_v1::{self, ZwlrDataControlManagerV1},
+    zwlr_data_control_manager_v1::ZwlrDataControlManagerV1,
     zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
     zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
 };
 
-use crate::error::{log_and_pass_on, Anyhow, Error};
+use crate::error::{log_and_pass_on, Anyhow};
 use crate::pincer::{Pincer, SeatPincerMap};
 use crate::register::MimeType;
 use crate::seat::{ClipboardState, SeatData, SeatIdentifier};
@@ -45,7 +39,6 @@ use crate::seat::{ClipboardState, SeatData, SeatIdentifier};
 pub struct Clipboard {
     queue: Arc<Mutex<EventQueue<Clipboard>>>,
     pincers: Arc<Mutex<SeatPincerMap>>,
-    conn: Connection,
     manager: ZwlrDataControlManagerV1,
     seats: HashMap<WlSeat, SeatData>,
     offers: HashMap<ZwlrDataControlOfferV1, HashMap<MimeType, PipeReader>>,
@@ -110,7 +103,6 @@ impl Clipboard {
         let mut clip = Clipboard {
             queue,
             pincers,
-            conn,
             manager,
             seats,
             offers: HashMap::new(),
@@ -150,14 +142,13 @@ impl Clipboard {
                 }
                 read_guard.read()
             };
-            //let mut rx = self.grab_tx.subscribe();
             let poll_grabber = async { self.grab_rx.recv().await };
             select! {
                 _ = token.cancelled() => break,
                 read = poll_wl => {
                     let mut q = q.lock().unwrap();
                     match read {
-                        Ok(n) => {
+                        Ok(_) => {
                             let _ = q
                                 .dispatch_pending(self)
                                 .map_err(|e| warn!("Wayland communication error: {e}"));
@@ -322,15 +313,6 @@ impl Clipboard {
     fn roundtrip(&mut self) -> Result<(), Anyhow> {
         let q = self.queue.clone();
         let res = q.lock().unwrap().roundtrip(self);
-        res.map(|_| {}).map_err(|e| {
-            error!("Wayland communication error: {e}");
-            anyhow::Error::new(e)
-        })
-    }
-
-    fn flush(&mut self) -> Result<(), Anyhow> {
-        let q = self.queue.clone();
-        let res = q.lock().unwrap().flush();
         res.map(|_| {}).map_err(|e| {
             error!("Wayland communication error: {e}");
             anyhow::Error::new(e)
