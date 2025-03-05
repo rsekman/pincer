@@ -159,7 +159,9 @@ impl Clipboard {
                     };
                 },
                 Ok(seat) = poll_grabber => {
-                    trace!("Received a message to grab {seat:?}");
+                    // Safety: this branch cannot be called except if the seat is registered, so it
+                    // is safe to call unwrap
+                    trace!("Received a message to grab clipboard of {} = {}", seat.id(), self.seats.get(&seat).unwrap());
                     let _ = self.grab(std::iter::once(&seat));
                 }
             }
@@ -173,16 +175,19 @@ impl Clipboard {
         T: Into<File>,
     {
         let Some(seat_data) = self.seats.get(seat) else {
-            warn!("Received request from unknown seat {seat:?}");
+            warn!("Received request from unknown seat {}", seat.id());
             return;
         };
         let Some(ref seat_name) = seat_data.name else {
-            warn!("Received request from unknown seat {seat:?}");
+            warn!("Received request from unknown seat {}", seat.id());
             return;
         };
         let pincers = self.pincers.lock().unwrap();
         let Some(pincer) = pincers.get(seat_name) else {
-            warn!("Clipboard of seat {seat_data:?} is not managed");
+            warn!(
+                "Clipboard of seat {} = {seat_data} is not managed",
+                seat.id()
+            );
             return;
         };
         let reg = pincer.get_active();
@@ -221,7 +226,7 @@ impl Clipboard {
         // Request each seat's data device
         let qh = self.queue.lock().unwrap().handle();
         for seat in seats.clone() {
-            trace!("Trying to grab clipboard of {seat:?}");
+            debug!("Trying to grab clipboard of {}", seat.id());
             if let Some(data) = self.seats.get_mut(seat) {
                 if data.device.is_none() {
                     let device = self.manager.get_data_device(seat, &qh, seat.clone());
@@ -240,12 +245,12 @@ impl Clipboard {
         let xs: Vec<_> = seats
             .clone()
             .into_iter()
-            .filter_map(|s| self.seats.get(s))
-            .filter_map(|data| {
+            .filter_map(|s| Some(s).zip(self.seats.get(s)))
+            .filter_map(|(s, data)| {
                 let offer = if let ClipboardState::Offer(ref offer) = data.clipboard_state {
                     Some(offer.clone())
                 } else {
-                    trace!("Seat {data:?} does not have an offer");
+                    trace!("Seat {} = {data} does not have an offer", s.id());
                     None
                 };
                 Option::zip(data.name.clone(), offer)
@@ -285,12 +290,13 @@ impl Clipboard {
         offer: &ZwlrDataControlOfferV1,
     ) -> Result<(), Anyhow> {
         let mimes = self.offers.get(offer).ok_or(anyhow::Error::msg(format!(
-            "Offer {offer:?} not registered"
+            "Offer {} not registered",
+            offer.id()
         )))?;
         let mut pincers = self.pincers.lock().unwrap();
         let pincer = pincers.get_mut(seat).ok_or_else(|| {
             error!("No pincer");
-            anyhow::Error::msg("No pincer found for {seat:?}")
+            anyhow::Error::msg(format!("No pincer found for {seat}"))
         })?;
 
         let read_data = |(mime, mut f): (&String, &PipeReader)| {
@@ -389,13 +395,13 @@ impl Dispatch<WlSeat, ()> for Clipboard {
         if let wl_seat::Event::Name { name } = event {
             let data = state.seats.get_mut(seat).unwrap();
             data.set_name(name.clone());
-            debug!("Registered seat {data:?}");
+            debug!("Registered seat {} = {data}", seat.id());
             let mut pincers = state.pincers.lock().unwrap();
             if let Entry::Vacant(e) = pincers.entry(name) {
                 e.insert(Pincer::new());
-                info!("Managing clipboard for {data:?}");
+                info!("Managing clipboard for {} = {data}", seat.id());
             } else {
-                warn!("Clipboard of seat {data:?} already managed");
+                warn!("Clipboard of seat {data} already managed");
             }
         }
     }
@@ -435,7 +441,6 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
             // This event is dispatched to notify us of a Device's Offer. We handle it by preparing
             // a new MIME -> buffer map for the offer.
             DataOffer { id } => {
-                //debug!("Data offer {id:?} introduced on seat {seat:?}");
                 let Some(seat) = state.seats.get(seat) else {
                     return;
                 };
@@ -460,7 +465,6 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
                     state.offers.remove(offer);
                 }
                 if let Some(offer) = id {
-                    debug!("Selection set on seat {seat:?}");
                     // If we own the clipboard, ignore this to prevent loopback. We will receive a
                     // ZwlrDataControlSource::Cancelled event to notify us that we don't own the
                     // clipboard anymore, which will set the state to Uninitialized, so this is safe.
@@ -469,17 +473,18 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
                         // selection
                         Source(_) => {}
                         _ => {
+                            debug!("Selection set by another client on {} = {data}", seat.id());
                             data.set_clipboard_state(Offer(offer));
                             // We cannot call grab() directly here. grab() needs to issue Wayland roundtrips,
                             // which creates a deadlock because roundtrip() cannot return before this function.
                             // We need to pass a message so that grab() will be called after this function
                             // returns.
-                            trace!("Passing a message to grab {seat:?}");
+                            trace!("Passing a message to grab {} = {data}", seat.id());
                             let _ = state.grab_tx.send(seat.clone());
                         }
                     }
                 } else {
-                    debug!("Selection on seat {seat:?} no longer valid");
+                    debug!("Selection on {} = {data} no longer valid", seat.id());
                     data.set_clipboard_state(Unavailable);
                 }
             }

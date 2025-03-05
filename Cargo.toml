@@ -3,6 +3,14 @@ name = "pincers"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "pincers"
+
+[lib]
+name = "pincers"
+doc = true
+document-private-items = true
+
 [dependencies]
 anyhow = "1.0.96"
 bounded-integer = { version = "0.5.8", features = ["num-traits02", "serde1", "types"] }

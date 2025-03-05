@@ -18,7 +18,7 @@ use pincers::register::{RegisterAddress, ADDRESS_HELP};
 use pincers::seat::SeatSpecification;
 
 #[derive(ArgParser)]
-#[command(name = "pincer")]
+#[command(name = "pincers")]
 #[command(version = "0.1")]
 struct CliOptions {
     #[arg(long = "log-level", help = "Log level", default_value = "Info")]
