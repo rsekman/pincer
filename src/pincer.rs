@@ -199,7 +199,9 @@ impl Pincer {
         let mut out = BTreeMap::new();
         out.extend(RegisterAddress::iter().filter_map(|addr| {
             match addr {
-                RegisterAddress::Numeric(n) => self.numeric.get(n.get() as usize),
+                RegisterAddress::Numeric(n) => self
+                    .numeric
+                    .get(shift_backward(n, self.pointer).get() as usize),
                 RegisterAddress::Named(n) => self.named.get(n.get() as usize),
             }
             .and_then(|r| {
