@@ -455,12 +455,12 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
                 let Some(seat) = state.seats.get(seat) else {
                     return;
                 };
-                // If we own the clipboard, ignore this offer
                 match seat.clipboard_state {
-                    Uninitialized | Offer(_) => {
+                    // If we own the clipboard, ignore this offer
+                    Source(_) => {}
+                    _ => {
                         state.offers.insert(id, HashMap::new());
                     }
-                    Source(_) => {}
                 }
             }
             // This event is dispatched after we have received all the MIME types for the offer
@@ -481,7 +481,10 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
                     // ZwlrDataControlSource::Cancelled event to notify us that we don't own the
                     // clipboard anymore, which will set the state to Uninitialized, so this is safe.
                     match data.clipboard_state {
-                        Uninitialized | Offer(_) => {
+                        // If we own the clipboard, ignore this -- this was us setting the
+                        // selection
+                        Source(_) => {}
+                        _ => {
                             data.set_clipboard_state(Offer(offer));
                             // We cannot call grab() directly here. grab() needs to issue Wayland roundtrips,
                             // which creates a deadlock because roundtrip() cannot return before this function.
@@ -490,11 +493,10 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
                             trace!("Passing a message to grab {seat:?}");
                             let _ = state.grab_tx.send(seat.clone());
                         }
-                        Source(_) => {}
                     }
                 } else {
                     debug!("Selection on seat {seat:?} no longer valid");
-                    data.set_clipboard_state(Uninitialized);
+                    data.set_clipboard_state(Unavailable);
                 }
             }
             // This event is dispatched to notify us that this device is no longer valid. We need

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use std::str::FromStr;
+use std::str::{self, FromStr};
 
 use bounded_integer::{BoundedI8, BoundedU8};
 use nom::{
@@ -127,7 +127,17 @@ pub enum RegisterSummary {
 impl Register {
     /// Return a summary of the contents of this register.
     pub fn summarize(&self) -> RegisterSummary {
-        RegisterSummary::Text("".to_owned(), 0)
+        RegisterSummary::Text(
+            format!(
+                "{:?}",
+                self.get(&String::from("text/plain"))
+                    .map(Vec::as_slice)
+                    .map(str::from_utf8)
+                    .map(Result::ok)
+                    .flatten()
+            ),
+            0,
+        )
     }
 
     /// Clear all the data from this register

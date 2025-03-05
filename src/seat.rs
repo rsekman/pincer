@@ -8,6 +8,7 @@ use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_source_v1::ZwlrDataControlSourceV1,
 };
 
+/// How to identify seats. The protocol guarantees that seats have unique string identifiers.
 pub(crate) type SeatIdentifier = String;
 
 /// Enum for which Seat a command should apply to
@@ -20,27 +21,34 @@ pub enum SeatSpecification {
     Specified(SeatIdentifier),
 }
 
+/// Enum representing the current state of a seat's clipboard
 #[derive(Default, Debug, Clone)]
 pub(crate) enum ClipboardState {
     #[default]
+    /// We have not yet received data about this seat's clipboard from the compositor
     Uninitialized,
+    /// This seat doesn't have anything copied
+    Unavailable,
+    /// Another client owns the clipboard
     Offer(ZwlrDataControlOfferV1),
+    /// We own the clipboard
     Source(ZwlrDataControlSourceV1),
 }
 
-/// Struct containing data relating to [`WlSeat`], for internal use by the
-/// [`Clipboard`](crate::clipboard::Clipboard)
+/// Struct containing data relating to [`WlSeat`](wayland_client::protocol::wl_seat::WlSeat), for
+/// internal use by the [`Clipboard`](crate::clipboard::Clipboard)
 #[derive(Default)]
 pub(crate) struct SeatData {
     /// The name of this seat, if any.
     pub name: Option<String>,
 
-    /// The numeric name assigned to this seat as a gloabl
+    /// The numeric name assigned to this seat as a global
     pub numeric_name: u32,
 
     /// The data device of this seat, if any.
     pub device: Option<ZwlrDataControlDeviceV1>,
 
+    /// Current state of this seat's clipboard. Do we or another client own it?
     pub clipboard_state: ClipboardState,
 }
 
@@ -70,7 +78,7 @@ impl SeatData {
         match &self.clipboard_state {
             Offer(offer) => offer.destroy(),
             Source(source) => source.destroy(),
-            Uninitialized => {}
+            Uninitialized | Unavailable => {}
         }
         self.clipboard_state = new_state;
     }
