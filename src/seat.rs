@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_device_v1::ZwlrDataControlDeviceV1,
     zwlr_data_control_offer_v1::ZwlrDataControlOfferV1,
+    zwlr_data_control_source_v1::ZwlrDataControlSourceV1,
 };
 
 pub(crate) type SeatIdentifier = String;
@@ -17,6 +18,14 @@ pub enum SeatSpecification {
     Unspecified,
     /// The command applies to the seat with this name
     Specified(SeatIdentifier),
+}
+
+#[derive(Default, Debug, Clone)]
+pub(crate) enum ClipboardState {
+    #[default]
+    Uninitialized,
+    Offer(ZwlrDataControlOfferV1),
+    Source(ZwlrDataControlSourceV1),
 }
 
 /// Struct containing data relating to [`WlSeat`], for internal use by the
@@ -32,11 +41,7 @@ pub(crate) struct SeatData {
     /// The data device of this seat, if any.
     pub device: Option<ZwlrDataControlDeviceV1>,
 
-    /// The data offer of this seat, if any.
-    pub offer: Option<ZwlrDataControlOfferV1>,
-
-    /// The primary-selection data offer of this seat, if any.
-    pub primary_offer: Option<ZwlrDataControlOfferV1>,
+    pub clipboard_state: ClipboardState,
 }
 
 impl SeatData {
@@ -60,25 +65,14 @@ impl SeatData {
     /// Sets this seat's data offer.
     ///
     /// Destroys the old one, if any.
-    pub fn set_offer(&mut self, new_offer: Option<ZwlrDataControlOfferV1>) {
-        let old_offer = self.offer.take();
-        self.offer = new_offer;
-
-        if let Some(offer) = old_offer {
-            offer.destroy();
+    pub fn set_clipboard_state(&mut self, new_state: ClipboardState) {
+        use ClipboardState::*;
+        match &self.clipboard_state {
+            Offer(offer) => offer.destroy(),
+            Source(source) => source.destroy(),
+            Uninitialized => {}
         }
-    }
-
-    /// Sets this seat's primary-selection data offer.
-    ///
-    /// Destroys the old one, if any.
-    pub fn set_primary_offer(&mut self, new_offer: Option<ZwlrDataControlOfferV1>) {
-        let old_offer = self.primary_offer.take();
-        self.primary_offer = new_offer;
-
-        if let Some(offer) = old_offer {
-            offer.destroy();
-        }
+        self.clipboard_state = new_state;
     }
 }
 

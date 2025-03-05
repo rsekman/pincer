@@ -15,7 +15,7 @@ use spdlog::prelude::*;
 
 use tokio::io::unix::AsyncFd;
 use tokio::select;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use tokio_util::sync::CancellationToken;
 
 use wayland_client::{
@@ -38,7 +38,7 @@ use wayland_protocols_wlr::data_control::v1::client::{
 use crate::error::{log_and_pass_on, Anyhow, Error};
 use crate::pincer::{Pincer, SeatPincerMap};
 use crate::register::MimeType;
-use crate::seat::{SeatData, SeatIdentifier};
+use crate::seat::{ClipboardState, SeatData, SeatIdentifier};
 
 /// Struct that interfaces with the Wayland compositor
 #[derive(Debug)]
@@ -49,6 +49,8 @@ pub struct Clipboard {
     manager: ZwlrDataControlManagerV1,
     seats: HashMap<WlSeat, SeatData>,
     offers: HashMap<ZwlrDataControlOfferV1, HashMap<MimeType, PipeReader>>,
+    grab_rx: broadcast::Receiver<WlSeat>,
+    grab_tx: broadcast::Sender<WlSeat>,
 }
 
 impl Clipboard {
@@ -104,6 +106,7 @@ impl Clipboard {
         });
 
         let queue = Arc::new(Mutex::new(queue));
+        let (grab_tx, grab_rx) = broadcast::channel::<WlSeat>(8);
         let mut clip = Clipboard {
             queue,
             pincers,
@@ -111,8 +114,10 @@ impl Clipboard {
             manager,
             seats,
             offers: HashMap::new(),
+            grab_rx,
+            grab_tx,
         };
-        clip.grab()?;
+        clip.grab_all()?;
 
         Ok(clip)
     }
@@ -145,6 +150,8 @@ impl Clipboard {
                 }
                 read_guard.read()
             };
+            //let mut rx = self.grab_tx.subscribe();
+            let poll_grabber = async { self.grab_rx.recv().await };
             select! {
                 _ = token.cancelled() => break,
                 read = poll_wl => {
@@ -159,6 +166,10 @@ impl Clipboard {
                             warn!("Wayland communication error: {e}");
                         }
                     };
+                },
+                Ok(seat) = poll_grabber => {
+                    trace!("Received a message to grab {seat:?}");
+                    let _ = self.grab(std::iter::once(&seat));
                 }
             }
         }
@@ -184,13 +195,13 @@ impl Clipboard {
             return;
         };
         let reg = pincer.get_active();
-        trace!("Received request for {mime}, using {reg}",);
+        debug!("Received request for {mime}, using {reg}",);
         match pincer.paste(&mime) {
             Ok(data) => {
                 let mut target_file: File = fd.into();
                 match target_file.write(data) {
                     Ok(n) => {
-                        trace!("Sent {n} bytes of type {mime} from {reg}",)
+                        debug!("Sent {n} bytes of type {mime} from {reg}",)
                     }
                     Err(e) => warn!("Could not send data: {e}"),
                 }
@@ -201,12 +212,31 @@ impl Clipboard {
         }
     }
 
-    fn grab(&mut self) -> Result<(), Anyhow> {
-        // request each seat's data device
+    /// Take ownership of the clipboards of all seats
+    fn grab_all(&mut self) -> Result<(), Anyhow> {
+        // cloning is necassary to avoid re-borrowing when we need to call a mutable method
+        let iter = self.seats.keys().cloned().collect::<Vec<_>>();
+        self.grab(&iter)
+    }
+
+    /// For each given seat, read its current clipboard state into the corresponding [`Pincer`]
+    /// instance, then take ownership of its clipboard.
+    fn grab<'a, I>(&mut self, seats: I) -> Result<(), Anyhow>
+    where
+        // + Clone is necessary because we need to iterate over the seats at least twice in order
+        // to minize Wayland roundtrips
+        I: IntoIterator<Item = &'a WlSeat> + Clone,
+    {
+        // Request each seat's data device
         let qh = self.queue.lock().unwrap().handle();
-        for (seat, data) in &mut self.seats {
-            let device = self.manager.get_data_device(seat, &qh, seat.clone());
-            data.set_device(Some(device));
+        for seat in seats.clone() {
+            trace!("Trying to grab clipboard of {seat:?}");
+            if let Some(data) = self.seats.get_mut(seat) {
+                if data.device.is_none() {
+                    let device = self.manager.get_data_device(seat, &qh, seat.clone());
+                    data.set_device(Some(device));
+                }
+            }
         }
 
         // After this round-trip we will know about all MIME types and have sent requests for them
@@ -215,11 +245,20 @@ impl Clipboard {
         // ... and after this round-trip the compositor will have written the data to the pipes
         self.roundtrip()?;
 
-        // request all the data!
-        let xs: Vec<_> = self
-            .seats
-            .iter()
-            .filter_map(|(_, data)| Option::zip(data.name.clone(), data.offer.clone()))
+        // Request all the data!
+        let xs: Vec<_> = seats
+            .clone()
+            .into_iter()
+            .filter_map(|s| self.seats.get(s))
+            .filter_map(|data| {
+                let offer = if let ClipboardState::Offer(ref offer) = data.clipboard_state {
+                    Some(offer.clone())
+                } else {
+                    trace!("Seat {data:?} does not have an offer");
+                    None
+                };
+                Option::zip(data.name.clone(), offer)
+            })
             // have to collect rather than use the iterator directly because the iterator will have
             // an immutable borrow of self
             .collect();
@@ -227,8 +266,23 @@ impl Clipboard {
             self.yank_from_selection(&name, &offer)?;
         }
 
-        // round-trip
-        // grab the clipboard
+        // Grab the clipboards
+        for (seat, data) in &mut self.seats {
+            let ClipboardState::Offer(ref offer) = data.clipboard_state else {
+                continue;
+            };
+            let source = self.manager.create_data_source(&qh, seat.clone());
+            let offer = offer.clone();
+            data.set_clipboard_state(ClipboardState::Source(source.clone()));
+            if let Some(ref mimes) = self.offers.get(&offer) {
+                for mime in mimes.keys() {
+                    source.offer(mime.clone());
+                }
+            }
+            data.device.as_ref().map(|d| d.set_selection(Some(&source)));
+        }
+        self.roundtrip()?;
+
         Ok(())
     }
 
@@ -237,10 +291,9 @@ impl Clipboard {
         seat: &SeatIdentifier,
         offer: &ZwlrDataControlOfferV1,
     ) -> Result<(), Anyhow> {
-        let mimes = self
-            .offers
-            .get(offer)
-            .ok_or(anyhow::Error::msg("Offer {offer:?} not registered"))?;
+        let mimes = self.offers.get(offer).ok_or(anyhow::Error::msg(format!(
+            "Offer {offer:?} not registered"
+        )))?;
         let mut pincers = self.pincers.lock().unwrap();
         let pincer = pincers.get_mut(seat).ok_or_else(|| {
             error!("No pincer");
@@ -269,6 +322,15 @@ impl Clipboard {
     fn roundtrip(&mut self) -> Result<(), Anyhow> {
         let q = self.queue.clone();
         let res = q.lock().unwrap().roundtrip(self);
+        res.map(|_| {}).map_err(|e| {
+            error!("Wayland communication error: {e}");
+            anyhow::Error::new(e)
+        })
+    }
+
+    fn flush(&mut self) -> Result<(), Anyhow> {
+        let q = self.queue.clone();
+        let res = q.lock().unwrap().flush();
         res.map(|_| {}).map_err(|e| {
             error!("Wayland communication error: {e}");
             anyhow::Error::new(e)
@@ -384,29 +446,56 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
         _qhandle: &QueueHandle<Self>,
     ) {
         use zwlr_data_control_device_v1::Event::*;
+        use ClipboardState::*;
         match event {
             // This event is dispatched to notify us of a Device's Offer. We handle it by preparing
             // a new MIME -> buffer map for the offer.
             DataOffer { id } => {
-                debug!("Data offer {id:?} introduced on seat {seat:?}");
-                state.offers.insert(id, HashMap::new());
+                //debug!("Data offer {id:?} introduced on seat {seat:?}");
+                let Some(seat) = state.seats.get(seat) else {
+                    return;
+                };
+                // If we own the clipboard, ignore this offer
+                match seat.clipboard_state {
+                    Uninitialized | Offer(_) => {
+                        state.offers.insert(id, HashMap::new());
+                    }
+                    Source(_) => {}
+                }
             }
             // This event is dispatched after we have received all the MIME types for the offer
             // indicated, or when the selection is unset
             Selection { id } => {
-                if let Some(ref offer) = id {
-                    debug!("Selection {offer:?} set on seat {seat:?}");
-                } else {
-                    debug!("Selection on seat {seat:?} no longer valid");
-                }
-                let Some(seat) = state.seats.get_mut(seat) else {
+                let Some(data) = state.seats.get_mut(seat) else {
                     return;
                 };
                 // The protocol demands that the previous offer will be destroyed; this will happen
                 // automatically because after these calls we no longer hold any references to our
                 // proxies.
-                seat.offer.as_ref().map(|o| state.offers.remove(o));
-                seat.set_offer(id);
+                if let Offer(ref offer) = data.clipboard_state {
+                    state.offers.remove(offer);
+                }
+                if let Some(offer) = id {
+                    debug!("Selection set on seat {seat:?}");
+                    // If we own the clipboard, ignore this to prevent loopback. We will receive a
+                    // ZwlrDataControlSource::Cancelled event to notify us that we don't own the
+                    // clipboard anymore, which will set the state to Uninitialized, so this is safe.
+                    match data.clipboard_state {
+                        Uninitialized | Offer(_) => {
+                            data.set_clipboard_state(Offer(offer));
+                            // We cannot call grab() directly here. grab() needs to issue Wayland roundtrips,
+                            // which creates a deadlock because roundtrip() cannot return before this function.
+                            // We need to pass a message so that grab() will be called after this function
+                            // returns.
+                            trace!("Passing a message to grab {seat:?}");
+                            let _ = state.grab_tx.send(seat.clone());
+                        }
+                        Source(_) => {}
+                    }
+                } else {
+                    debug!("Selection on seat {seat:?} no longer valid");
+                    data.set_clipboard_state(Uninitialized);
+                }
             }
             // This event is dispatched to notify us that this device is no longer valid. We need
             // to drop references to it and its offer, if any.
@@ -414,11 +503,11 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
                 let Some(seat) = state.seats.get_mut(seat) else {
                     return;
                 };
-                if let Some(ref offer) = seat.offer {
+                if let Offer(ref offer) = seat.clipboard_state {
                     state.offers.remove(offer);
                 }
                 seat.set_device(None);
-                seat.set_offer(None);
+                seat.set_clipboard_state(Uninitialized)
             }
             _ => {}
         }
@@ -452,7 +541,9 @@ impl Dispatch<ZwlrDataControlSourceV1, WlSeat> for Clipboard {
             // clipboard. We need to grab the clipboard back and receive the new newly copied data.
             Cancelled {} => {
                 source.destroy();
-                let _ = state.grab();
+                if let Some(data) = state.seats.get_mut(seat) {
+                    data.set_clipboard_state(ClipboardState::Uninitialized);
+                }
             }
             _ => (),
         }
@@ -476,18 +567,18 @@ impl Dispatch<ZwlrDataControlOfferV1, ()> for Clipboard {
         #[allow(clippy::single_match)]
         match event {
             Offer { mime_type } => {
-                debug!("MIME type {mime_type} is available from offer {offer:?}");
+                // We avoid registering offers that we created ourselves
+                let Some(pipes) = state.offers.get_mut(offer) else {
+                    return;
+                };
                 // Create a new pipe through which we can receive the data for this MIME type, then
                 // request that data.
                 match pipe() {
                     Ok((reader, writer)) => {
                         offer.receive(mime_type.clone(), writer.as_fd());
-                        state
-                            .offers
-                            .get_mut(offer)
-                            .map(|o| o.insert(mime_type, reader));
+                        pipes.insert(mime_type, reader);
                     }
-                    Err(e) => error!("Could not create fipe to receive data: {e}"),
+                    Err(e) => error!("Could not create pipe to receive data: {e}"),
                 }
             }
             _ => {}
