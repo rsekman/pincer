@@ -265,12 +265,14 @@ impl Clipboard {
             let source = self.manager.create_data_source(&qh, seat.clone());
             let offer = offer.clone();
             data.set_clipboard_state(ClipboardState::Source(source.clone()));
-            if let Some(ref mimes) = self.offers.get(&offer) {
+            if let Some(mimes) = self.offers.get(&offer) {
                 for mime in mimes.keys() {
                     source.offer(mime.clone());
                 }
             }
-            data.device.as_ref().map(|d| d.set_selection(Some(&source)));
+            if let Some(ref d) = data.device {
+                d.set_selection(Some(&source));
+            }
         }
         self.roundtrip()?;
 

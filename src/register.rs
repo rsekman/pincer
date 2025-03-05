@@ -133,8 +133,7 @@ impl Register {
                 self.get(&String::from("text/plain"))
                     .map(Vec::as_slice)
                     .map(str::from_utf8)
-                    .map(Result::ok)
-                    .flatten()
+                    .and_then(Result::ok)
             ),
             0,
         )
