@@ -178,7 +178,7 @@ impl Daemon {
 
             match args {
                 Some((seat, pincer)) => {
-                    Self::execute_request(req.request, seat, pincer, &clipboard_tx)
+                    Self::execute_request(req.request, seat, pincer, clipboard_tx)
                 }
                 None => {
                     let msg = format!(
@@ -201,7 +201,7 @@ impl Daemon {
     // This method is factored out so the ? operator can be used
     fn execute_request(
         req: RequestType,
-        seat: &String,
+        seat: &str,
         pincer: &mut Pincer,
         clipboard_tx: &Option<ClipboardTx>,
     ) -> Response {
@@ -212,7 +212,7 @@ impl Daemon {
                     pincer.yank_into(addr, reg.into_iter())?,
                 );
                 if let Some(tx) = clipboard_tx {
-                    tx.send(ClipboardMessage::OfferOnSeat(seat.clone()))
+                    tx.send(ClipboardMessage::OfferOnSeat(seat.to_owned()))
                         .map_err(|e| format!("Could not pass message to Clipboard: {e}"))?;
                 }
                 out

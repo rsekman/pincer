@@ -349,9 +349,9 @@ impl Clipboard {
             seat.clone()
         };
 
-        self.seats
-            .get_mut(&seat)
-            .map(|d| d.set_clipboard_state(ClipboardState::Switching));
+        if let Some(data) = self.seats.get_mut(&seat) {
+            data.set_clipboard_state(ClipboardState::Switching)
+        };
         // We need to roundtrip here because if we owned the selection previously, setting the
         // state to Switching will destroy our ZwlrDataControlSourceV1 proxy, which will emit a
         // "selection no longer valid" event ( ZwlrDataControlDevice::Selection(None) ). We must

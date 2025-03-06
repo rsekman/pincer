@@ -164,7 +164,7 @@ impl Register {
         self.map.get(mime)
     }
 
-    pub fn keys<'a>(&'a self) -> Keys<'a, MimeType, DataBuffer> {
+    pub fn keys(&self) -> Keys<'_, MimeType, DataBuffer> {
         self.map.keys()
     }
 }
