@@ -1,4 +1,4 @@
-use std::io::{stdin, stdout, Read, Write};
+use std::io::{stdin, stdout, IsTerminal, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
@@ -14,7 +14,7 @@ use pincers::daemon::{
 };
 use pincers::error::{Anyhow, Error};
 use pincers::pincer::SeatPincerMap;
-use pincers::register::{RegisterAddress, ADDRESS_HELP};
+use pincers::register::{MimeType, Register, RegisterAddress, ADDRESS_HELP};
 use pincers::seat::SeatSpecification;
 
 #[derive(ArgParser)]
@@ -82,8 +82,13 @@ async fn daemon() -> Result<(), Anyhow> {
     let pincers = SeatPincerMap::new();
     let pincers = Arc::new(Mutex::new(pincers));
     let token = CancellationToken::new();
-    let d = Daemon::new(pincers.clone()).await?;
+
+    // Initializing in this order protects against messing up the clipboard in case the Daemon
+    // fails to initialize.
+    let mut d = Daemon::new(pincers.clone(), None).await?;
     let mut cb = Clipboard::new(pincers.clone())?;
+    let tx = cb.get_tx();
+    d.set_clipboard_tx(tx);
 
     // Three tasks in the JoinSet:
     // - the Clipboard interfacing with Wayland
@@ -148,9 +153,25 @@ fn handle_yank(addr: RegisterAddress, n: usize) -> Result<(), Error> {
 }
 
 fn handle_paste(data: &[u8]) -> Result<(), Error> {
-    std::io::stdout()
+    let mut stdout = stdout();
+    stdout
         .write_all(data)
-        .map_err(|e| format!("I/O error: {e}"))
+        .map_err(|e| format!("I/O error: {e}"))?;
+    if stdout.is_terminal() {
+        stdout
+            .write("\n".as_bytes())
+            .map_err(|e| format!("I/O error: {e}"))?;
+    }
+    Ok(())
+}
+
+fn make_yank_request(addr: Option<RegisterAddress>, mime: MimeType) -> Result<RequestType, Anyhow> {
+    let mut stdin = stdin().lock();
+    let mut buffer = Vec::new();
+    stdin.read_to_end(&mut buffer)?;
+    let mut r = Register::new();
+    r.insert(mime, buffer);
+    Ok(RequestType::Yank(addr, r))
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -168,10 +189,7 @@ async fn main() -> Result<(), Anyhow> {
                 Show { address } => RequestType::Show(address),
                 List {} => RequestType::List(),
                 Register(RegisterArgs { command }) => RequestType::Register(command),
-                Yank {
-                    address: _,
-                    mime: _,
-                } => todo!(),
+                Yank { address, mime } => make_yank_request(address, mime)?,
                 Daemon {} => unreachable!(),
             };
             send_request(Request { seat, request }).await

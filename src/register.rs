@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::Keys, HashMap};
 use std::fmt::{Display, Formatter};
 use std::str::{self, FromStr};
 
@@ -125,6 +125,12 @@ pub enum RegisterSummary {
 }
 
 impl Register {
+    pub fn new() -> Self {
+        Register {
+            map: HashMap::new(),
+        }
+    }
+
     /// Return a summary of the contents of this register.
     pub fn summarize(&self) -> RegisterSummary {
         RegisterSummary::Text(
@@ -156,6 +162,10 @@ impl Register {
     /// Get the data buffer corresponding to given MIME type
     pub fn get(&self, mime: &MimeType) -> Option<&DataBuffer> {
         self.map.get(mime)
+    }
+
+    pub fn keys<'a>(&'a self) -> Keys<'a, MimeType, DataBuffer> {
+        self.map.keys()
     }
 }
 

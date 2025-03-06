@@ -26,4 +26,3 @@ tokio-unix-ipc = { version = "0.3.0", features = ["serde"], git = "https://githu
 tokio-util = "0.7.13"
 wayland-client = "0.31.8"
 wayland-protocols-wlr = { version = "0.3.6", features = ["client"] }
-wl-clipboard-rs = "0.9.1"

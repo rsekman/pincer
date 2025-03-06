@@ -34,6 +34,13 @@ use crate::pincer::{Pincer, SeatPincerMap};
 use crate::register::MimeType;
 use crate::seat::{ClipboardState, SeatData, SeatIdentifier};
 
+#[derive(Clone, Debug)]
+pub enum ClipboardMessage {
+    OfferOnSeat(String),
+    GrabSeat(WlSeat),
+}
+pub type ClipboardTx = broadcast::Sender<ClipboardMessage>;
+
 /// Struct that interfaces with the Wayland compositor
 #[derive(Debug)]
 pub struct Clipboard {
@@ -42,8 +49,10 @@ pub struct Clipboard {
     manager: ZwlrDataControlManagerV1,
     seats: HashMap<WlSeat, SeatData>,
     offers: HashMap<ZwlrDataControlOfferV1, HashMap<MimeType, PipeReader>>,
-    grab_rx: broadcast::Receiver<WlSeat>,
-    grab_tx: broadcast::Sender<WlSeat>,
+    /// Receiving end of a channel that can be used to pass messages to this `Clipboard`
+    rx: broadcast::Receiver<ClipboardMessage>,
+    /// Transmitting end of a channel that can be used to pass messages to this `Clipboard`
+    tx: broadcast::Sender<ClipboardMessage>,
 }
 
 impl Clipboard {
@@ -99,15 +108,15 @@ impl Clipboard {
         });
 
         let queue = Arc::new(Mutex::new(queue));
-        let (grab_tx, grab_rx) = broadcast::channel::<WlSeat>(8);
+        let (tx, rx) = broadcast::channel::<ClipboardMessage>(8);
         let mut clip = Clipboard {
             queue,
             pincers,
             manager,
             seats,
             offers: HashMap::new(),
-            grab_rx,
-            grab_tx,
+            rx,
+            tx,
         };
         clip.grab_all()?;
 
@@ -142,7 +151,7 @@ impl Clipboard {
                 }
                 read_guard.read()
             };
-            let poll_grabber = async { self.grab_rx.recv().await };
+            let poll_channel = async { self.rx.recv().await };
             select! {
                 _ = token.cancelled() => break,
                 read = poll_wl => {
@@ -158,11 +167,20 @@ impl Clipboard {
                         }
                     };
                 },
-                Ok(seat) = poll_grabber => {
-                    // Safety: this branch cannot be called except if the seat is registered, so it
-                    // is safe to call unwrap
-                    trace!("Received a message to grab clipboard of {} = {}", seat.id(), self.seats.get(&seat).unwrap());
-                    let _ = self.grab(std::iter::once(&seat));
+                Ok(msg) = poll_channel => {
+                    use ClipboardMessage::*;
+                    match msg {
+                        GrabSeat(seat) => {
+                            // Safety: this branch cannot be called except if the seat is registered, so it
+                            // is safe to call unwrap
+                            trace!("Received a message to grab clipboard of {} = {}", seat.id(), self.seats.get(&seat).unwrap());
+                            let _ = self.grab(std::iter::once(&seat));
+                        }
+                        OfferOnSeat(seat) => {
+                            trace!("Received a message to offer on seat {seat}");
+                            let _ = self.offer(&seat);
+                        }
+                    }
                 }
             }
         }
@@ -190,7 +208,7 @@ impl Clipboard {
             );
             return;
         };
-        let reg = pincer.get_active();
+        let reg = pincer.get_active_address();
         debug!("Received request for {mime}, using {reg}",);
         match pincer.paste(&mime) {
             Ok(data) => {
@@ -318,6 +336,62 @@ impl Clipboard {
             .map_err(anyhow::Error::msg)
     }
 
+    fn offer(&mut self, name: &String) -> Result<(), Anyhow> {
+        let seat = {
+            let Some((seat, _)) = self
+                .seats
+                .iter()
+                .find(|(_, v)| v.name.as_ref() == Some(name))
+            else {
+                warn!("Received a message to offer data on seat {name}, but it is not registered");
+                anyhow::bail!("Unregistered seat");
+            };
+            seat.clone()
+        };
+
+        self.seats
+            .get_mut(&seat)
+            .map(|d| d.set_clipboard_state(ClipboardState::Switching));
+        // We need to roundtrip here because if we owned the selection previously, setting the
+        // state to Switching will destroy our ZwlrDataControlSourceV1 proxy, which will emit a
+        // "selection no longer valid" event ( ZwlrDataControlDevice::Selection(None) ). We must
+        // ensure that this event is received while still in the Switching state, i.e., before
+        // setting it to Source below.
+        self.roundtrip()?;
+
+        // This block needs an immutable borrow of self, but the roundtrip below needs a mutable
+        // borrow. The same effect could be achieved by cloning the Arc<Mutex<_>> first, as that
+        // would release the borrow on self. That's cheap, but this way is somewhat clearer to read.
+        {
+            let pincers = self.pincers.lock().unwrap();
+            let Some(pincer) = pincers.get(name) else {
+                warn!("Received a message to offer data on seat {name}, but it is not managed");
+                anyhow::bail!("Unmanaged seat");
+            };
+
+            let address = pincer.get_active_address();
+            let register = pincer.get_active_register();
+            debug!("Offering data on {} ({name}) from {address}", seat.id());
+
+            let qh = self.queue.lock().unwrap().handle();
+            let source = self.manager.create_data_source(&qh, seat.clone());
+            // Safety: seat is guaranteed to be a key in self.seats
+            let data = self.seats.get_mut(&seat).unwrap();
+            data.set_clipboard_state(ClipboardState::Source(source.clone()));
+            for mime in register.keys() {
+                source.offer(mime.clone());
+            }
+            if let Some(ref d) = data.device {
+                d.set_selection(Some(&source));
+            }
+        }
+        // Immutable borrows of self are released here
+
+        self.roundtrip()?;
+
+        Ok(())
+    }
+
     fn roundtrip(&mut self) -> Result<(), Anyhow> {
         let q = self.queue.clone();
         let res = q.lock().unwrap().roundtrip(self);
@@ -325,6 +399,11 @@ impl Clipboard {
             error!("Wayland communication error: {e}");
             anyhow::Error::new(e)
         })
+    }
+
+    /// Get a [`Sender`](broadcast::Sender) that can be used to pass messages to this `Clipboard`
+    pub fn get_tx(&self) -> broadcast::Sender<ClipboardMessage> {
+        self.tx.clone()
     }
 }
 
@@ -471,7 +550,7 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
                     match data.clipboard_state {
                         // If we own the clipboard, ignore this -- this was us setting the
                         // selection
-                        Source(_) => {}
+                        Source(_) | Switching => {}
                         _ => {
                             debug!("Selection set by another client on {} = {data}", seat.id());
                             data.set_clipboard_state(Offer(offer));
@@ -480,12 +559,23 @@ impl Dispatch<ZwlrDataControlDeviceV1, WlSeat> for Clipboard {
                             // We need to pass a message so that grab() will be called after this function
                             // returns.
                             trace!("Passing a message to grab {} = {data}", seat.id());
-                            let _ = state.grab_tx.send(seat.clone());
+                            let _ = state.tx.send(ClipboardMessage::GrabSeat(seat.clone()));
                         }
                     }
                 } else {
-                    debug!("Selection on {} = {data} no longer valid", seat.id());
-                    data.set_clipboard_state(Unavailable);
+                    debug!(
+                        "Selection on {} = {data} no longer valid {:?}",
+                        seat.id(),
+                        data.clipboard_state
+                    );
+                    match &data.clipboard_state {
+                        Switching => {
+                            debug!("In the process of switching");
+                        }
+                        _ => {
+                            data.set_clipboard_state(Unavailable);
+                        }
+                    }
                 }
             }
             // This event is dispatched to notify us that this device is no longer valid. We need

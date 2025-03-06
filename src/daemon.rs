@@ -14,6 +14,7 @@ use tokio::{
 use tokio_unix_ipc::{channel_from_std, Sender};
 use tokio_util::sync::CancellationToken;
 
+use crate::clipboard::{ClipboardMessage, ClipboardTx};
 use crate::error::{Anyhow, Error};
 use crate::pincer::{Pincer, SeatPincerMap};
 use crate::register::{MimeType, Register, RegisterAddress, RegisterSummary, ADDRESS_HELP};
@@ -27,6 +28,7 @@ const LOCK_NAME: &str = "lock";
 pub struct Daemon {
     pincers: Arc<Mutex<SeatPincerMap>>,
     lock: File,
+    clipboard_tx: Option<ClipboardTx>,
 }
 
 impl Daemon {
@@ -36,7 +38,11 @@ impl Daemon {
     ///
     /// * `pincers` - Reference to the pool of [Pincers](Pincer) to be shared between this Daemon instance
     ///   and a [`Clipboard`](crate::clipboard::Clipboard) instance
-    pub async fn new(pincers: Arc<Mutex<SeatPincerMap>>) -> Result<Daemon, Anyhow> {
+    /// * `clipboard_tx` - Transmitting end of a channel that the `Daemon` can use to pass messages to a `Clipboard` instance
+    pub async fn new(
+        pincers: Arc<Mutex<SeatPincerMap>>,
+        clipboard_tx: Option<ClipboardTx>,
+    ) -> Result<Daemon, Anyhow> {
         let dir = get_directory();
         create_dir_all(&dir)
             .or_else(|e| match e.kind() {
@@ -60,7 +66,15 @@ impl Daemon {
             e
         })?;
 
-        Ok(Daemon { pincers, lock })
+        Ok(Daemon {
+            pincers,
+            lock,
+            clipboard_tx,
+        })
+    }
+
+    pub fn set_clipboard_tx(&mut self, tx: ClipboardTx) {
+        self.clipboard_tx = Some(tx);
     }
 
     /// Listen for commands from clients
@@ -86,7 +100,8 @@ impl Daemon {
                     Ok((stream, _)) => {
                         let p = self.pincers.clone();
                         let t = token.clone();
-                        tokio::spawn(async move { Self::accept(stream, p, t).await });
+                        let tx = self.clipboard_tx.clone();
+                        tokio::spawn(async move { Self::accept(stream, p, tx, t).await });
                     },
                     Err(e) => { error!("{e}"); break Err(Anyhow::new(e)) }
                 }
@@ -97,6 +112,7 @@ impl Daemon {
     async fn accept(
         conn: UnixStream,
         pincers: Arc<Mutex<SeatPincerMap>>,
+        clipboard_tx: Option<ClipboardTx>,
         token: CancellationToken,
     ) -> Result<(), Anyhow> {
         // No errors from handling a request should be fatal, but the short-circuit ? operator is
@@ -115,7 +131,7 @@ impl Daemon {
             // accept() call; there is no need to loop in this function
             msg = rx.recv() => {
                 match msg {
-                Ok(req) => Self::handle_request(req, &tx, pincers).await,
+                Ok(req) => Self::handle_request(req, &tx, pincers, &clipboard_tx).await,
                 Err(e) => match e.kind() {
                     TimedOut | ConnectionReset | ConnectionAborted => {
                         info!("Client disconnected: {e}");
@@ -144,6 +160,7 @@ impl Daemon {
         req: Request,
         tx: &Sender<Response>,
         pincers: Arc<Mutex<SeatPincerMap>>,
+        clipboard_tx: &Option<ClipboardTx>,
     ) -> Result<(), Anyhow> {
         debug!("Received request: {req:?}");
 
@@ -154,13 +171,15 @@ impl Daemon {
                 warn!("Could not acquire mutex: {e}");
                 anyhow::Error::msg("Internal server error: {e}")
             })?;
-            let pincer = match req.seat {
-                Unspecified => pincers.values_mut().next(),
-                Specified(ref k) => pincers.get_mut(k),
+            let args = match req.seat {
+                Unspecified => pincers.iter_mut().next(),
+                Specified(ref k) => Option::zip(Some(k), pincers.get_mut(k)),
             };
 
-            match pincer {
-                Some(pincer) => Self::execute_request(req.request, pincer),
+            match args {
+                Some((seat, pincer)) => {
+                    Self::execute_request(req.request, seat, pincer, &clipboard_tx)
+                }
                 None => {
                     let msg = format!(
                         "Received request for seat {:?}, but its clipboard is not managed by this daemon",
@@ -180,12 +199,24 @@ impl Daemon {
     }
 
     // This method is factored out so the ? operator can be used
-    fn execute_request(req: RequestType, pincer: &mut Pincer) -> Response {
+    fn execute_request(
+        req: RequestType,
+        seat: &String,
+        pincer: &mut Pincer,
+        clipboard_tx: &Option<ClipboardTx>,
+    ) -> Response {
         let res = match req {
-            RequestType::Yank(addr, reg) => ResponseType::Yank(
-                addr.unwrap_or_default(),
-                pincer.yank_into(addr, reg.into_iter())?,
-            ),
+            RequestType::Yank(addr, reg) => {
+                let out = ResponseType::Yank(
+                    addr.unwrap_or_default(),
+                    pincer.yank_into(addr, reg.into_iter())?,
+                );
+                if let Some(tx) = clipboard_tx {
+                    tx.send(ClipboardMessage::OfferOnSeat(seat.clone()))
+                        .map_err(|e| format!("Could not pass message to Clipboard: {e}"))?;
+                }
+                out
+            }
             RequestType::Paste(addr, mime) => ResponseType::Paste(
                 addr.unwrap_or_default(),
                 pincer.paste_from(addr, &mime)?.clone(),

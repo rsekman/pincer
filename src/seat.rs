@@ -1,6 +1,8 @@
 // Mostly copied from wl_clipboard_rs
 use std::fmt::{Debug, Display, Formatter};
 
+use spdlog::prelude::*;
+
 use serde::{Deserialize, Serialize};
 use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_device_v1::ZwlrDataControlDeviceV1,
@@ -33,6 +35,8 @@ pub(crate) enum ClipboardState {
     Offer(ZwlrDataControlOfferV1),
     /// We own the clipboard
     Source(ZwlrDataControlSourceV1),
+    /// We owned the clipboard, but we are changing the selection
+    Switching,
 }
 
 /// Struct containing data relating to [`WlSeat`](wayland_client::protocol::wl_seat::WlSeat), for
@@ -75,12 +79,14 @@ impl SeatData {
     /// Destroys the old one, if any.
     pub fn set_clipboard_state(&mut self, new_state: ClipboardState) {
         use ClipboardState::*;
-        match &self.clipboard_state {
+        debug!("Setting state to {new_state:?}");
+        let old_state = self.clipboard_state.clone();
+        self.clipboard_state = new_state;
+        match old_state {
             Offer(offer) => offer.destroy(),
             Source(source) => source.destroy(),
-            Uninitialized | Unavailable => {}
+            _ => {}
         }
-        self.clipboard_state = new_state;
     }
 }
 

@@ -57,8 +57,13 @@ impl Pincer {
         .unwrap()
     }
 
-    pub fn get_active(&self) -> RegisterAddress {
+    /// Get the address of the currently selected register
+    pub fn get_active_address(&self) -> RegisterAddress {
         self.active.unwrap_or_default()
+    }
+
+    pub fn get_active_register(&self) -> &Register {
+        self.register(Some(self.get_active_address()))
     }
 
     /// Get the data contained in a register
